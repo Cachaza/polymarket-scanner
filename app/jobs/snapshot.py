@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+import logging
+import random
+import time
+from typing import Any, Dict, Iterable, List
+
+import httpx
+
+from ..clients.clob import ClobPublicClient
+from ..clients.data_api import DataAPIClient
+from ..config import Settings
+from ..db import Database
+from ..extract import build_holder_rows
+from ..utils import chunked, synthetic_trade_key, utc_now_iso
+
+logger = logging.getLogger(__name__)
+
+HOLDERS_BATCH_SIZE = 5
+HOLDERS_REQUEST_DELAY_BASE = 0.35
+HOLDERS_REQUEST_DELAY_JITTER = 0.25
+PRICE_ANOMALY_THRESHOLD = 0.10
+HOLDER_CONCENTRATION_THRESHOLD = 0.10
+WALLET_QUALITY_THRESHOLD = 60.0
+TRADE_ENRICHMENT_LIMIT = 25
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _group_holders_by_token(payload: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in payload:
+        token_id = str(entry.get("token"))
+        out[token_id] = entry.get("holders", []) or []
+    return out
+
+
+def _top5_seen_share(holders: List[Dict[str, Any]]) -> float | None:
+    amounts = [_to_float(holder.get("amount")) for holder in holders]
+    clean = [value for value in amounts if value is not None]
+    if not clean:
+        return None
+    total_seen = sum(clean)
+    if total_seen <= 0:
+        return None
+    return sum(clean[:5]) / total_seen
+
+
+def _top_amount(holders: List[Dict[str, Any]]) -> float | None:
+    if not holders:
+        return None
+    return _to_float(holders[0].get("amount"))
+
+
+def _observed_wallet_count(*holder_lists: List[Dict[str, Any]]) -> int:
+    wallets = set()
+    for holder_list in holder_lists:
+        for holder in holder_list:
+            wallet = holder.get("proxyWallet")
+            if wallet:
+                wallets.add(str(wallet).lower())
+    return len(wallets)
+
+
+def _passes_price_anomaly(latest_snapshot: Dict[str, Any], prev_snapshot: Dict[str, Any] | None) -> bool:
+    if not prev_snapshot:
+        return False
+    old_yes = prev_snapshot["yes_price"]
+    new_yes = latest_snapshot.get("yes_price")
+    return (
+        old_yes is not None
+        and new_yes is not None
+        and abs(new_yes - old_yes) >= PRICE_ANOMALY_THRESHOLD
+    )
+
+
+def _passes_holder_concentration(latest_snapshot: Dict[str, Any], prev_snapshot: Dict[str, Any] | None) -> bool:
+    if not prev_snapshot:
+        return False
+    old_top = prev_snapshot["yes_top5_seen_share"]
+    new_top = latest_snapshot.get("yes_top5_seen_share")
+    return (
+        old_top is not None
+        and new_top is not None
+        and new_top - old_top >= HOLDER_CONCENTRATION_THRESHOLD
+    )
+
+
+def _holder_wallet_addresses(*holder_lists: List[Dict[str, Any]]) -> List[str]:
+    wallets = []
+    seen = set()
+    for holder_list in holder_lists:
+        for holder in holder_list:
+            wallet = str(holder.get("proxyWallet") or "").lower()
+            if wallet and wallet not in seen:
+                seen.add(wallet)
+                wallets.append(wallet)
+    return wallets
+
+
+def _passes_wallet_quality(wallet_addresses: Iterable[str], wallet_scores: Dict[str, Any]) -> bool:
+    for wallet in wallet_addresses:
+        score_row = wallet_scores.get(wallet)
+        if not score_row:
+            continue
+        politics_score = score_row["politics_score"] or 0
+        overall_score = score_row["overall_score"] or 0
+        if politics_score >= WALLET_QUALITY_THRESHOLD or overall_score >= WALLET_QUALITY_THRESHOLD:
+            return True
+    return False
+
+
+def _has_local_history(prev_snapshot: Dict[str, Any] | None) -> bool:
+    return prev_snapshot is not None
+
+
+def _normalize_trade_rows(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for trade in trades:
+        wallet = str(trade.get("proxyWallet") or "").lower() or None
+        price = _to_float(trade.get("price"))
+        size = _to_float(trade.get("size"))
+        out.append(
+            {
+                "trade_key": synthetic_trade_key(
+                    trade.get("transactionHash"),
+                    wallet,
+                    trade.get("conditionId"),
+                    trade.get("timestamp"),
+                    trade.get("side"),
+                    size,
+                    price,
+                    trade.get("outcome"),
+                ),
+                "trade_ts": trade.get("timestamp"),
+                "condition_id": trade.get("conditionId"),
+                "token_id": trade.get("asset"),
+                "wallet_address": wallet,
+                "side": trade.get("side"),
+                "price": price,
+                "size": size,
+                "notional": (price or 0) * (size or 0) if price is not None and size is not None else None,
+                "tx_hash": trade.get("transactionHash"),
+                "title": trade.get("title"),
+                "outcome": trade.get("outcome"),
+                "raw_json": trade,
+            }
+        )
+    return out
+
+
+def run(settings: Settings, db: Database) -> None:
+    market_rows = db.get_active_markets(limit=settings.market_limit)
+    if not market_rows:
+        logger.info("No active markets in DB. Run discover first.")
+        return
+
+    clob = ClobPublicClient(timeout=settings.request_timeout, user_agent=settings.user_agent)
+    data_api = DataAPIClient(timeout=settings.request_timeout, user_agent=settings.user_agent)
+    snapshot_ts = utc_now_iso()
+
+    try:
+        token_ids = []
+        for row in market_rows:
+            if row["yes_token_id"]:
+                token_ids.append(row["yes_token_id"])
+            if row["no_token_id"]:
+                token_ids.append(row["no_token_id"])
+
+        price_map: Dict[str, Dict[str, Any]] = {}
+        for batch in chunked(token_ids, 500):
+            for item in clob.get_last_trade_prices(batch):
+                price_map[str(item.get("token_id"))] = item
+
+        condition_ids = [row["condition_id"] for row in market_rows]
+        holders_by_condition: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        holder_rows_to_insert: List[Dict[str, Any]] = []
+        for batch in chunked(condition_ids, HOLDERS_BATCH_SIZE):
+            try:
+                payload = data_api.get_top_holders(batch, limit=settings.holder_limit, min_balance=settings.holder_min_balance)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                if status_code == 403:
+                    logger.warning("Skipping holders batch after repeated 403 cooldowns: %s", ",".join(batch))
+                    continue
+                raise
+            # Endpoint returns token-based groups, so split using our market token mapping
+            by_token = _group_holders_by_token(payload)
+            for market in market_rows:
+                if market["condition_id"] not in batch:
+                    continue
+                yes_holders = by_token.get(market["yes_token_id"], [])
+                no_holders = by_token.get(market["no_token_id"], [])
+                holders_by_condition[market["condition_id"]] = {
+                    "yes": yes_holders,
+                    "no": no_holders,
+                }
+                holder_rows_to_insert.extend(
+                    build_holder_rows(
+                        condition_id=market["condition_id"],
+                        snapshot_ts=snapshot_ts,
+                        holder_payload=[
+                            {"token": market["yes_token_id"], "holders": yes_holders},
+                            {"token": market["no_token_id"], "holders": no_holders},
+                        ],
+                    )
+                )
+            time.sleep(HOLDERS_REQUEST_DELAY_BASE + random.random() * HOLDERS_REQUEST_DELAY_JITTER)
+
+        db.insert_holder_snapshot_rows(holder_rows_to_insert)
+
+        holder_wallets_by_condition = {
+            condition_id: _holder_wallet_addresses(holder_info["yes"], holder_info["no"])
+            for condition_id, holder_info in holders_by_condition.items()
+        }
+        all_holder_wallets = sorted(
+            {
+                wallet
+                for wallet_addresses in holder_wallets_by_condition.values()
+                for wallet in wallet_addresses
+            }
+        )
+        wallet_scores = db.get_wallet_scores(all_holder_wallets)
+
+        watchlist_condition_ids: List[str] = []
+        price_anomaly_count = 0
+        holder_concentration_count = 0
+        wallet_quality_count = 0
+        watchlist_warmup_count = 0
+        watchlist_history_ready_count = 0
+
+        for market in market_rows:
+            yes_info = price_map.get(market["yes_token_id"], {})
+            no_info = price_map.get(market["no_token_id"], {})
+            holder_info = holders_by_condition.get(market["condition_id"], {"yes": [], "no": []})
+
+            snapshot = {
+                "condition_id": market["condition_id"],
+                "snapshot_ts": snapshot_ts,
+                "yes_price": _to_float(yes_info.get("price")),
+                "no_price": _to_float(no_info.get("price")),
+                "yes_side": yes_info.get("side"),
+                "no_side": no_info.get("side"),
+                "yes_holder_count": len(holder_info["yes"]),
+                "no_holder_count": len(holder_info["no"]),
+                "yes_top_holder_amount": _top_amount(holder_info["yes"]),
+                "no_top_holder_amount": _top_amount(holder_info["no"]),
+                "yes_top5_seen_share": _top5_seen_share(holder_info["yes"]),
+                "no_top5_seen_share": _top5_seen_share(holder_info["no"]),
+                "observed_holder_wallets": _observed_wallet_count(holder_info["yes"], holder_info["no"]),
+                "raw_json": {
+                    "yes_price": yes_info,
+                    "no_price": no_info,
+                    "holders": holder_info,
+                },
+            }
+            db.insert_market_snapshot(snapshot)
+            prev_snapshot = db.get_snapshot_before(market["condition_id"], snapshot_ts, 6)
+            price_anomaly_pass = _passes_price_anomaly(snapshot, prev_snapshot)
+            holder_concentration_pass = _passes_holder_concentration(snapshot, prev_snapshot)
+            wallet_quality_pass = _passes_wallet_quality(
+                holder_wallets_by_condition.get(market["condition_id"], []),
+                wallet_scores,
+            )
+
+            if price_anomaly_pass:
+                price_anomaly_count += 1
+            if holder_concentration_pass:
+                holder_concentration_count += 1
+            if wallet_quality_pass:
+                wallet_quality_count += 1
+
+            if price_anomaly_pass or holder_concentration_pass or wallet_quality_pass:
+                watchlist_condition_ids.append(market["condition_id"])
+                if _has_local_history(prev_snapshot):
+                    watchlist_history_ready_count += 1
+                else:
+                    watchlist_warmup_count += 1
+
+        # Enrich watchlist candidates, including warm-up markets, to build context cheaply.
+        enriched_condition_ids = watchlist_condition_ids[:TRADE_ENRICHMENT_LIMIT]
+        for condition_id in enriched_condition_ids:
+            trades = data_api.get_trades(markets=[condition_id], limit=50, offset=0, taker_only=True)
+            db.insert_trades(_normalize_trade_rows(trades))
+
+        db.commit()
+        logger.info(
+            "Watchlist funnel: %s price anomaly, %s holder concentration, %s wallet quality, %s watchlist candidates, %s history-ready, %s warmup-only, %s enriched with trades",
+            price_anomaly_count,
+            holder_concentration_count,
+            wallet_quality_count,
+            len(watchlist_condition_ids),
+            watchlist_history_ready_count,
+            watchlist_warmup_count,
+            len(enriched_condition_ids),
+        )
+        logger.info(
+            "Snapshot finished: %s markets, %s holder rows, %s watchlist markets enriched with trades",
+            len(market_rows),
+            len(holder_rows_to_insert),
+            len(enriched_condition_ids),
+        )
+    finally:
+        clob.close()
+        data_api.close()
