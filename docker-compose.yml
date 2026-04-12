@@ -28,6 +28,9 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    networks:
+      - default
+      - dokploy-network
 
   worker:
     build:
@@ -47,6 +50,9 @@ services:
       - /usr/local/bin/worker-entrypoint.sh
     volumes:
       - scanner_data:/app/data
+    networks:
+      - default
+      - dokploy-network
 
   web:
     build:
