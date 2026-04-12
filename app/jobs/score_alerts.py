@@ -16,7 +16,7 @@ def _row_to_dict(row) -> dict:
     return {key: row[key] for key in row.keys()}
 
 
-def run(settings: Settings, db: Database) -> None:
+def run(settings: Settings, db: Database) -> dict[str, int]:
     markets = db.get_active_markets(limit=settings.market_limit)
     alert_ts = utc_now_iso()
     history_ready_count = 0
@@ -89,3 +89,9 @@ def run(settings: Settings, db: Database) -> None:
         inserted_alerts,
         sent_count,
     )
+    return {
+        "history_ready": history_ready_count,
+        "warmup_skipped": warmup_skipped_count,
+        "new_alerts": inserted_alerts,
+        "sent_alerts": sent_count,
+    }

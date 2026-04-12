@@ -21,6 +21,8 @@ def safe_json_dumps(value: Any) -> str:
 
 
 def build_market_url(event_slug: str | None, market_slug: str | None) -> str | None:
+    # Event pages are the stable public Polymarket URLs. Market-specific slugs
+    # are not consistently routable on the public site, so prefer the event slug.
     slug = event_slug or market_slug
     if not slug:
         return None

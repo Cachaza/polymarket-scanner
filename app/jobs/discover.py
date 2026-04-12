@@ -10,7 +10,7 @@ from ..clients.gamma import GammaClient
 logger = logging.getLogger(__name__)
 
 
-def run(settings: Settings, db: Database) -> None:
+def run(settings: Settings, db: Database) -> dict[str, int]:
     client = GammaClient(timeout=settings.request_timeout, user_agent=settings.user_agent)
     try:
         count_events = 0
@@ -25,5 +25,6 @@ def run(settings: Settings, db: Database) -> None:
                 break
         db.commit()
         logger.info("Discover finished: %s events, %s scoped markets", count_events, count_markets)
+        return {"events": count_events, "markets": count_markets}
     finally:
         client.close()

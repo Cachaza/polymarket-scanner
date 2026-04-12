@@ -34,6 +34,51 @@ class Database:
         self.conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
     def _migrate_schema(self) -> None:
+        market_columns = {
+            "market_id": "TEXT",
+            "question_id": "TEXT",
+            "market_url": "TEXT",
+            "accepting_orders": "INTEGER",
+            "closed_time": "TEXT",
+            "image_url": "TEXT",
+            "reward_asset_address": "TEXT",
+        }
+        for column_name, definition in market_columns.items():
+            self._ensure_column("markets", column_name, definition)
+
+        self.conn.execute(
+            """
+            UPDATE markets
+            SET
+                market_id = COALESCE(market_id, json_extract(raw_json, '$.id')),
+                question_id = COALESCE(question_id, json_extract(raw_json, '$.questionID')),
+                market_url = COALESCE(
+                    market_url,
+                    CASE
+                        WHEN COALESCE(event_slug, slug) IS NOT NULL
+                        THEN 'https://polymarket.com/event/' || COALESCE(event_slug, slug)
+                    END
+                ),
+                accepting_orders = COALESCE(accepting_orders, json_extract(raw_json, '$.acceptingOrders')),
+                end_date = COALESCE(
+                    end_date,
+                    json_extract(raw_json, '$.endDate'),
+                    json_extract(raw_json, '$.umaEndDate'),
+                    json_extract(raw_json, '$.closedTime')
+                ),
+                closed_time = COALESCE(closed_time, json_extract(raw_json, '$.closedTime')),
+                image_url = COALESCE(
+                    image_url,
+                    json_extract(raw_json, '$.image'),
+                    json_extract(raw_json, '$.icon')
+                ),
+                reward_asset_address = COALESCE(
+                    reward_asset_address,
+                    json_extract(raw_json, '$.clobRewards[0].assetAddress')
+                )
+            """
+        )
+
         alert_columns = {
             "score_total": "REAL NOT NULL DEFAULT 0",
             "score_price_anomaly": "REAL NOT NULL DEFAULT 0",
@@ -115,23 +160,30 @@ class Database:
         self.conn.execute(
             '''
             INSERT INTO markets (
-                condition_id, event_id, event_slug, slug, title, description, category,
-                active, closed, archived, end_date, yes_token_id, no_token_id, discovered_at,
-                last_seen_at, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                condition_id, event_id, event_slug, slug, market_id, question_id, market_url, title, description, category,
+                active, closed, archived, accepting_orders, end_date, closed_time, yes_token_id, no_token_id, image_url,
+                reward_asset_address, discovered_at, last_seen_at, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(condition_id) DO UPDATE SET
                 event_id=excluded.event_id,
                 event_slug=excluded.event_slug,
                 slug=excluded.slug,
+                market_id=excluded.market_id,
+                question_id=excluded.question_id,
+                market_url=excluded.market_url,
                 title=excluded.title,
                 description=excluded.description,
                 category=excluded.category,
                 active=excluded.active,
                 closed=excluded.closed,
                 archived=excluded.archived,
+                accepting_orders=excluded.accepting_orders,
                 end_date=excluded.end_date,
+                closed_time=excluded.closed_time,
                 yes_token_id=excluded.yes_token_id,
                 no_token_id=excluded.no_token_id,
+                image_url=excluded.image_url,
+                reward_asset_address=excluded.reward_asset_address,
                 last_seen_at=excluded.last_seen_at,
                 raw_json=excluded.raw_json
             ''',
@@ -140,15 +192,22 @@ class Database:
                 market.event_id,
                 market.event_slug,
                 market.slug,
+                market.market_id,
+                market.question_id,
+                market.market_url,
                 market.title,
                 market.description,
                 market.category,
                 int(market.active),
                 int(market.closed),
                 int(market.archived),
+                int(market.accepting_orders) if market.accepting_orders is not None else None,
                 market.end_date,
+                market.closed_time,
                 market.yes_token_id,
                 market.no_token_id,
+                market.image_url,
+                market.reward_asset_address,
                 utc_now_iso(),
                 utc_now_iso(),
                 market.raw_json,
@@ -157,6 +216,9 @@ class Database:
 
     def commit(self) -> None:
         self.conn.commit()
+
+    def rollback(self) -> None:
+        self.conn.rollback()
 
     def get_active_markets(self, limit: int = 250) -> List[sqlite3.Row]:
         cur = self.conn.execute(
@@ -487,6 +549,70 @@ class Database:
                 alert.reason_summary,
                 alert.summary,
                 alert.reasons_json,
+            ),
+        )
+
+    def insert_watchlist_candidate(self, row: Dict[str, Any]) -> None:
+        self.conn.execute(
+            '''
+            INSERT OR REPLACE INTO watchlist_candidates (
+                snapshot_ts, condition_id, market_title, current_yes_price, price_delta_6h,
+                yes_top5_seen_share, price_anomaly_hit, holder_concentration_hit,
+                wallet_quality_hit, warmup_only, history_ready_6h, trade_enriched,
+                reason_summary, component_flags_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                row["snapshot_ts"],
+                row["condition_id"],
+                row.get("market_title"),
+                row.get("current_yes_price"),
+                row.get("price_delta_6h"),
+                row.get("yes_top5_seen_share"),
+                int(bool(row.get("price_anomaly_hit"))),
+                int(bool(row.get("holder_concentration_hit"))),
+                int(bool(row.get("wallet_quality_hit"))),
+                int(bool(row.get("warmup_only"))),
+                int(bool(row.get("history_ready_6h"))),
+                int(bool(row.get("trade_enriched"))),
+                row.get("reason_summary"),
+                safe_json_dumps(row.get("component_flags_json", {})),
+            ),
+        )
+
+    def start_job_run(self, job_name: str, started_at: str) -> int:
+        cur = self.conn.execute(
+            '''
+            INSERT INTO job_runs (job_name, started_at, status)
+            VALUES (?, ?, ?)
+            ''',
+            (job_name, started_at, "running"),
+        )
+        return int(cur.lastrowid)
+
+    def finish_job_run(
+        self,
+        job_run_id: int,
+        *,
+        finished_at: str,
+        status: str,
+        rows_written: int | None = None,
+        meta: Dict[str, Any] | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            '''
+            UPDATE job_runs
+            SET finished_at = ?, status = ?, rows_written = ?, meta_json = ?, error_text = ?
+            WHERE id = ?
+            ''',
+            (
+                finished_at,
+                status,
+                rows_written,
+                safe_json_dumps(meta or {}),
+                error_text,
+                job_run_id,
             ),
         )
 

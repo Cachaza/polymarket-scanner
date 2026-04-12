@@ -10,15 +10,22 @@ class MarketRecord:
     event_id: str | None
     event_slug: str | None
     slug: str | None
+    market_id: str | None
+    question_id: str | None
+    market_url: str | None
     title: str
     description: str | None
     category: str | None
     active: bool
     closed: bool
     archived: bool
+    accepting_orders: bool | None
     end_date: str | None
+    closed_time: str | None
     yes_token_id: str | None
     no_token_id: str | None
+    image_url: str | None
+    reward_asset_address: str | None
     raw_json: str
 
 

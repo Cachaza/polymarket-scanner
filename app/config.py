@@ -47,6 +47,8 @@ DEFAULT_KEYWORDS = [
 @dataclass(frozen=True)
 class Settings:
     db_path: Path = Path(os.getenv("POLY_DB_PATH", "data/polymarket.sqlite"))
+    backtest_csv_path: Path = Path(os.getenv("POLY_BACKTEST_CSV_PATH", "data/backtest.csv"))
+    latent_backtest_csv_path: Path = Path(os.getenv("POLY_LATENT_BACKTEST_CSV_PATH", "data/latent_backtest.csv"))
     request_timeout: float = float(os.getenv("POLY_REQUEST_TIMEOUT", "20"))
     discovery_limit: int = int(os.getenv("POLY_DISCOVERY_LIMIT", "200"))
     market_limit: int = int(os.getenv("POLY_MARKET_LIMIT", "250"))

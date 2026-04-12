@@ -121,6 +121,26 @@ def _has_local_history(prev_snapshot: Dict[str, Any] | None) -> bool:
     return prev_snapshot is not None
 
 
+def _watchlist_reason_summary(
+    *,
+    price_anomaly_hit: bool,
+    holder_concentration_hit: bool,
+    wallet_quality_hit: bool,
+    history_ready_6h: bool,
+) -> str:
+    reasons: List[str] = []
+    if price_anomaly_hit:
+        reasons.append("price anomaly")
+    if holder_concentration_hit:
+        reasons.append("holder concentration")
+    if wallet_quality_hit:
+        reasons.append("wallet quality")
+    if not reasons:
+        return "watchlist candidate"
+    suffix = "history-ready" if history_ready_6h else "warm-up"
+    return f"{', '.join(reasons)} ({suffix})"
+
+
 def _normalize_trade_rows(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     for trade in trades:
@@ -156,11 +176,11 @@ def _normalize_trade_rows(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def run(settings: Settings, db: Database) -> None:
+def run(settings: Settings, db: Database) -> dict[str, int]:
     market_rows = db.get_active_markets(limit=settings.market_limit)
     if not market_rows:
         logger.info("No active markets in DB. Run discover first.")
-        return
+        return {"markets": 0, "holder_rows": 0, "watchlist_candidates": 0, "trade_enriched": 0}
 
     clob = ClobPublicClient(timeout=settings.request_timeout, user_agent=settings.user_agent)
     data_api = DataAPIClient(timeout=settings.request_timeout, user_agent=settings.user_agent)
@@ -279,16 +299,59 @@ def run(settings: Settings, db: Database) -> None:
 
             if price_anomaly_pass or holder_concentration_pass or wallet_quality_pass:
                 watchlist_condition_ids.append(market["condition_id"])
-                if _has_local_history(prev_snapshot):
+                history_ready_6h = _has_local_history(prev_snapshot)
+                if history_ready_6h:
                     watchlist_history_ready_count += 1
                 else:
                     watchlist_warmup_count += 1
+                db.insert_watchlist_candidate(
+                    {
+                        "snapshot_ts": snapshot_ts,
+                        "condition_id": market["condition_id"],
+                        "market_title": market["title"],
+                        "current_yes_price": snapshot.get("yes_price"),
+                        "price_delta_6h": (
+                            snapshot["yes_price"] - prev_snapshot["yes_price"]
+                            if prev_snapshot
+                            and prev_snapshot["yes_price"] is not None
+                            and snapshot["yes_price"] is not None
+                            else None
+                        ),
+                        "yes_top5_seen_share": snapshot.get("yes_top5_seen_share"),
+                        "price_anomaly_hit": price_anomaly_pass,
+                        "holder_concentration_hit": holder_concentration_pass,
+                        "wallet_quality_hit": wallet_quality_pass,
+                        "warmup_only": not history_ready_6h,
+                        "history_ready_6h": history_ready_6h,
+                        "trade_enriched": False,
+                        "reason_summary": _watchlist_reason_summary(
+                            price_anomaly_hit=price_anomaly_pass,
+                            holder_concentration_hit=holder_concentration_pass,
+                            wallet_quality_hit=wallet_quality_pass,
+                            history_ready_6h=history_ready_6h,
+                        ),
+                        "component_flags_json": {
+                            "price_anomaly": price_anomaly_pass,
+                            "holder_concentration": holder_concentration_pass,
+                            "wallet_quality": wallet_quality_pass,
+                            "history_ready_6h": history_ready_6h,
+                        },
+                    }
+                )
 
         # Enrich watchlist candidates, including warm-up markets, to build context cheaply.
         enriched_condition_ids = watchlist_condition_ids[:TRADE_ENRICHMENT_LIMIT]
         for condition_id in enriched_condition_ids:
             trades = data_api.get_trades(markets=[condition_id], limit=50, offset=0, taker_only=True)
             db.insert_trades(_normalize_trade_rows(trades))
+            db.conn.execute(
+                '''
+                UPDATE watchlist_candidates
+                SET trade_enriched = 1
+                WHERE condition_id = ? AND snapshot_ts = ?
+                ''',
+                (condition_id, snapshot_ts),
+            )
 
         db.commit()
         logger.info(
@@ -307,6 +370,12 @@ def run(settings: Settings, db: Database) -> None:
             len(holder_rows_to_insert),
             len(enriched_condition_ids),
         )
+        return {
+            "markets": len(market_rows),
+            "holder_rows": len(holder_rows_to_insert),
+            "watchlist_candidates": len(watchlist_condition_ids),
+            "trade_enriched": len(enriched_condition_ids),
+        }
     finally:
         clob.close()
         data_api.close()

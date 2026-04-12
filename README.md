@@ -82,6 +82,80 @@ uv run polymarket-scanner init-db
 
 If you prefer the module form, use `uv run python -m app ...`.
 
+## Scanner Console
+
+This repo now includes a local read-only scanner console:
+
+- a small FastAPI layer over the SQLite database
+- a Next.js app in `web/`
+- persisted `watchlist_candidates` history
+- tracked `job_runs` for discover / refresh / snapshot / score-alerts / backtest
+
+### Start the API
+
+```bash
+uv run polymarket-scanner-api
+```
+
+The API serves these read endpoints under `/api/v1`:
+
+- `/overview`
+- `/markets`
+- `/watchlist`
+- `/alerts`
+- `/markets/{condition_id}`
+- `/markets/{condition_id}/timeseries`
+- `/markets/{condition_id}/holders`
+- `/markets/{condition_id}/trades`
+- `/markets/{condition_id}/trade-aftermath`
+- `/research/backtests`
+- `/research/latent-backtests`
+- `/system`
+
+The system UI also exposes local action endpoints so you can trigger selected jobs from the dashboard:
+
+- `POST /system/actions/run`
+
+### Start the web app
+
+```bash
+cd web
+nvm use
+npm install
+SCANNER_API_BASE_URL=http://127.0.0.1:8000 npm run dev
+```
+
+Open `http://127.0.0.1:3000`.
+
+The frontend is intended to run on Node `24.x` LTS. A `.nvmrc` file is included in `web/` so `nvm use` will select the right version.
+
+When running against the live API, `SCANNER_API_BASE_URL` is the internal destination used by the Next.js rewrite. Browser requests go through `/scanner-api`, so the frontend still works correctly inside Docker and behind Dokploy.
+
+### Mock mode for frontend work
+
+If you want to work on the UI without the Python API running:
+
+```bash
+cd web
+nvm use
+npm install
+NEXT_PUBLIC_SCANNER_API_MODE=mock npm run dev
+```
+
+### Frontend checks
+
+```bash
+cd web
+npm run typecheck
+npm run lint
+```
+
+### Python checks
+
+```bash
+uv run pytest
+```
+
 ## Commands
 
 ```bash
@@ -90,6 +164,7 @@ uv run polymarket-scanner refresh-leaderboard
 uv run polymarket-scanner snapshot
 uv run polymarket-scanner score-alerts
 uv run polymarket-scanner backtest --hours 24
+uv run polymarket-scanner latent-backtest --hours 24 72 120 --confirm-hours 24 --max-drift 0.05 --min-notional 1000 --min-wallet-score 60
 uv run polymarket-scanner run-cycle
 ```
 
@@ -108,6 +183,42 @@ uv run polymarket-scanner run-cycle
 # score alerts every 15 minutes, a minute later
 1-59/15 * * * * cd /path/to/polymarket_scanner && .venv/bin/polymarket-scanner score-alerts
 ```
+
+## Docker / Dokploy
+
+The repo now includes:
+
+- a backend image for the FastAPI API and CLI jobs
+- a frontend image for the Next.js console
+- a worker service that runs the scheduled scanner jobs inside the same Compose stack
+- a named Docker volume for the SQLite database and CSV outputs
+
+### Local Compose
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+The web UI is exposed on `http://localhost:3000` by default. The backend API stays internal to the Compose network and is reached by the frontend through `/scanner-api`.
+
+The default worker schedules match the README cron examples and can be overridden from `.env` with:
+
+- `POLY_DISCOVER_CRON`
+- `POLY_REFRESH_LEADERBOARD_CRON`
+- `POLY_SNAPSHOT_CRON`
+- `POLY_SCORE_ALERTS_CRON`
+
+### Dokploy
+
+Use the repository as a Docker Compose application and expose only the `web` service.
+
+Recommended Dokploy setup:
+
+- copy `.env.example` to `.env` and fill in any Polymarket / Telegram settings you need
+- keep the `scanner_data` volume persistent so SQLite and CSV outputs survive redeploys
+- route your public domain to the `web` service on port `3000`
+- leave `api` and `worker` private on the internal Compose network
 
 ## Notes on rate limits
 

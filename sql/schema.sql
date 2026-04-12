@@ -25,15 +25,22 @@ CREATE TABLE IF NOT EXISTS markets (
     event_id TEXT,
     event_slug TEXT,
     slug TEXT,
+    market_id TEXT,
+    question_id TEXT,
+    market_url TEXT,
     title TEXT,
     description TEXT,
     category TEXT,
     active INTEGER,
     closed INTEGER,
     archived INTEGER,
+    accepting_orders INTEGER,
     end_date TEXT,
+    closed_time TEXT,
     yes_token_id TEXT,
     no_token_id TEXT,
+    image_url TEXT,
+    reward_asset_address TEXT,
     discovered_at TEXT,
     last_seen_at TEXT,
     raw_json TEXT,
@@ -162,3 +169,47 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(alert_ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_condition_ts ON alerts(condition_id, alert_ts);
+
+CREATE TABLE IF NOT EXISTS watchlist_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_ts TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    market_title TEXT,
+    current_yes_price REAL,
+    price_delta_6h REAL,
+    yes_top5_seen_share REAL,
+    price_anomaly_hit INTEGER NOT NULL DEFAULT 0,
+    holder_concentration_hit INTEGER NOT NULL DEFAULT 0,
+    wallet_quality_hit INTEGER NOT NULL DEFAULT 0,
+    warmup_only INTEGER NOT NULL DEFAULT 0,
+    history_ready_6h INTEGER NOT NULL DEFAULT 0,
+    trade_enriched INTEGER NOT NULL DEFAULT 0,
+    reason_summary TEXT,
+    component_flags_json TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_watchlist_candidates_unique
+ON watchlist_candidates(condition_id, snapshot_ts);
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_candidates_snapshot_ts
+ON watchlist_candidates(snapshot_ts);
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_candidates_condition_ts
+ON watchlist_candidates(condition_id, snapshot_ts);
+
+CREATE TABLE IF NOT EXISTS job_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_name TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    rows_written INTEGER,
+    meta_json TEXT,
+    error_text TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_runs_name_started
+ON job_runs(job_name, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_job_runs_status_started
+ON job_runs(status, started_at DESC);

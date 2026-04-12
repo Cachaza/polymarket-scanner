@@ -1,0 +1,83 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POLY_DB_PATH: /app/data/polymarket.sqlite
+      POLY_BACKTEST_CSV_PATH: /app/data/backtest.csv
+      POLY_LATENT_BACKTEST_CSV_PATH: /app/data/latent_backtest.csv
+      POLY_API_HOST: 0.0.0.0
+      POLY_API_PORT: 8000
+    expose:
+      - "8000"
+    volumes:
+      - scanner_data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/system', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      POLY_DB_PATH: /app/data/polymarket.sqlite
+      POLY_BACKTEST_CSV_PATH: /app/data/backtest.csv
+      POLY_LATENT_BACKTEST_CSV_PATH: /app/data/latent_backtest.csv
+    entrypoint:
+      - /usr/local/bin/worker-entrypoint.sh
+    volumes:
+      - scanner_data:/app/data
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        SCANNER_API_INTERNAL_URL: http://api:8000
+        NEXT_PUBLIC_SCANNER_API_BASE_URL: /scanner-api
+        NEXT_PUBLIC_SCANNER_API_MODE: live
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      SCANNER_API_INTERNAL_URL: http://api:8000
+      NEXT_PUBLIC_SCANNER_API_BASE_URL: /scanner-api
+      NEXT_PUBLIC_SCANNER_API_MODE: live
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  scanner_data:

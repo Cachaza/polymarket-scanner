@@ -6,11 +6,6 @@ from typing import Any, Dict
 from .backtest import DEFAULT_BACKTEST_HORIZONS
 from .config import Settings
 from .db import Database
-from .jobs.snapshot import (
-    _passes_holder_concentration,
-    _passes_price_anomaly,
-    _passes_wallet_quality,
-)
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
@@ -37,39 +32,16 @@ def _format_age(first_snapshot_ts: str | None) -> str:
     return f"{days}d {hours}h {minutes}m"
 
 
-def _count_watchlist_candidates(settings: Settings, db: Database) -> int:
-    active_markets = db.get_active_markets(limit=settings.market_limit)
-    latest_snapshots: Dict[str, Dict[str, Any]] = {}
-    latest_holder_wallets: Dict[str, list[str]] = {}
-    all_wallets = set()
-
-    for market in active_markets:
-        condition_id = market["condition_id"]
-        latest_snapshot = db.get_latest_snapshot(condition_id)
-        if not latest_snapshot:
-            continue
-        latest_snapshots[condition_id] = _row_to_dict(latest_snapshot)
-        latest_holders = db.get_latest_holder_addresses(condition_id)
-        latest_holder_wallets[condition_id] = latest_holders
-        all_wallets.update(latest_holders)
-
-    wallet_scores = db.get_wallet_scores(sorted(all_wallets))
-    watchlist_count = 0
-
-    for market in active_markets:
-        condition_id = market["condition_id"]
-        latest_snapshot = latest_snapshots.get(condition_id)
-        if not latest_snapshot:
-            continue
-        prev_snapshot = db.get_snapshot_before(condition_id, latest_snapshot["snapshot_ts"], 6)
-        prev_snapshot_dict = _row_to_dict(prev_snapshot) if prev_snapshot else None
-        price_anomaly_pass = _passes_price_anomaly(latest_snapshot, prev_snapshot_dict)
-        holder_concentration_pass = _passes_holder_concentration(latest_snapshot, prev_snapshot_dict)
-        wallet_quality_pass = _passes_wallet_quality(latest_holder_wallets.get(condition_id, []), wallet_scores)
-        if price_anomaly_pass or holder_concentration_pass or wallet_quality_pass:
-            watchlist_count += 1
-
-    return watchlist_count
+def _count_watchlist_candidates(db: Database) -> int:
+    latest_row = db.conn.execute("SELECT MAX(snapshot_ts) AS snapshot_ts FROM watchlist_candidates").fetchone()
+    latest_snapshot_ts = latest_row["snapshot_ts"] if latest_row else None
+    if not latest_snapshot_ts:
+        return 0
+    count_row = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM watchlist_candidates WHERE snapshot_ts = ?",
+        (latest_snapshot_ts,),
+    ).fetchone()
+    return int(count_row["n"]) if count_row else 0
 
 
 def render_diagnostics(settings: Settings, db: Database) -> str:
@@ -90,7 +62,7 @@ def render_diagnostics(settings: Settings, db: Database) -> str:
         f"Markets with enough 6h history: {db.count_history_ready_markets(active_condition_ids, 6)}",
         f"Markets with enough 24h history: {db.count_history_ready_markets(active_condition_ids, 24)}",
         f"Markets with enough 72h history: {db.count_history_ready_markets(active_condition_ids, 72)}",
-        f"Watchlist candidates: {_count_watchlist_candidates(settings, db)}",
+        f"Watchlist candidates: {_count_watchlist_candidates(db)}",
         f"Alerts count: {len(alerts)}",
     ]
     for hours in DEFAULT_BACKTEST_HORIZONS:

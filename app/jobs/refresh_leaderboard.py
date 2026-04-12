@@ -22,7 +22,7 @@ def _extract_wallet_entries(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def run(settings: Settings, db: Database) -> None:
+def run(settings: Settings, db: Database) -> dict[str, int]:
     client = DataAPIClient(timeout=settings.request_timeout, user_agent=settings.user_agent)
     snapshot_ts = utc_now_iso()
     try:
@@ -61,5 +61,6 @@ def run(settings: Settings, db: Database) -> None:
         db.update_wallet_summary_fields()
         db.commit()
         logger.info("Leaderboard refresh finished: %s wallet score rows processed", seen_wallets)
+        return {"wallet_score_rows": seen_wallets}
     finally:
         client.close()

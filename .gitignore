@@ -16,3 +16,9 @@ wheels/
 # Local runtime artifacts
 data/*.sqlite
 data/*.csv
+
+# Next.js artifacts
+web/.next/
+web/node_modules/
+web/playwright-report/
+web/test-results/
