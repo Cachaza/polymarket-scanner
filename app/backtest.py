@@ -549,17 +549,17 @@ def _wallet_visible_at_or_after(
         WITH holder_cycle AS (
             SELECT MIN(snapshot_ts) AS snapshot_ts
             FROM holder_snapshots
-            WHERE condition_id = ?
-              AND snapshot_ts >= ?
+            WHERE condition_id = %s
+              AND snapshot_ts >= %s
         )
         SELECT
             (SELECT snapshot_ts FROM holder_cycle) AS snapshot_ts,
             EXISTS(
                 SELECT 1
                 FROM holder_snapshots hs
-                WHERE hs.condition_id = ?
+                WHERE hs.condition_id = %s
                   AND hs.snapshot_ts = (SELECT snapshot_ts FROM holder_cycle)
-                  AND LOWER(hs.wallet_address) = LOWER(?)
+                  AND LOWER(hs.wallet_address) = LOWER(%s)
             ) AS visible
         """,
         (condition_id, base_ts, condition_id, wallet_address),

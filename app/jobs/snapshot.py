@@ -348,7 +348,7 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
                 '''
                 UPDATE watchlist_candidates
                 SET trade_enriched = 1
-                WHERE condition_id = ? AND snapshot_ts = ?
+                WHERE condition_id = %s AND snapshot_ts = %s
                 ''',
                 (condition_id, snapshot_ts),
             )
