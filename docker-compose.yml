@@ -64,8 +64,8 @@ services:
       SCANNER_API_INTERNAL_URL: http://api:8000
       NEXT_PUBLIC_SCANNER_API_BASE_URL: /scanner-api
       NEXT_PUBLIC_SCANNER_API_MODE: live
-    ports:
-      - "${WEB_PORT:-3000}:3000"
+    expose:
+      - "3000"
     healthcheck:
       test:
         [
