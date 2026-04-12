@@ -54,18 +54,24 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Apply schema migrations on every startup (idempotent)."""
-    logger.info("Applying database schema...")
+    if not settings.database_url:
+        raise RuntimeError(
+            "POLY_DATABASE_URL is not set. "
+            "Set it in Dokploy environment variables and redeploy."
+        )
+    logger.info("Applying database schema to %s...", settings.database_url.split("@")[-1])
     db = Database(settings.database_url)
     try:
         db.init_schema(get_schema_path())
         db.commit()
         logger.info("Schema applied successfully.")
-    except Exception:
-        logger.exception("Failed to apply schema on startup")
+    except Exception as exc:
+        logger.exception("Failed to apply schema on startup: %s", exc)
         raise
     finally:
         db.close()
     yield
+
 
 
 app = FastAPI(title="Polymarket Scanner API", version="0.1.0", lifespan=lifespan)
