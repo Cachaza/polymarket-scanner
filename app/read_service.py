@@ -3,11 +3,13 @@ from __future__ import annotations
 from bisect import bisect_left, bisect_right
 import csv
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
+
+import psycopg
+from psycopg.rows import dict_row
 
 from .api_models import (
     AggregateBucket,
@@ -37,19 +39,24 @@ from .backtest import DEFAULT_BACKTEST_HORIZONS, DEFAULT_LATENT_BACKTEST_HORIZON
 from .config import Settings
 from .utils import build_market_url, utc_now_iso
 
+# Type alias for a psycopg connection used in read-only queries
+PgConn = psycopg.Connection
+
 
 def _parse_db_ts(value: str | None) -> datetime | None:
     if not value:
         return None
-    if value.isdigit():
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if str(value).isdigit():
         timestamp = int(value)
         if timestamp > 10_000_000_000:
             timestamp /= 1000
         return datetime.fromtimestamp(timestamp, tz=timezone.utc)
     try:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     except ValueError:
-        normalized = value.replace(" ", "T")
+        normalized = str(value).replace(" ", "T")
         if normalized.endswith("Z"):
             normalized = normalized[:-1] + "+00:00"
         try:
@@ -73,10 +80,10 @@ def _format_age(first_snapshot_ts: str | None) -> str:
     return f"{days}d {hours}h {minutes}m"
 
 
-def _row_to_dict(row: sqlite3.Row | None) -> Dict[str, Any]:
+def _row_to_dict(row: Dict[str, Any] | None) -> Dict[str, Any]:
     if row is None:
         return {}
-    return {key: row[key] for key in row.keys()}
+    return dict(row)
 
 
 def _json_loads(value: str | None, fallback: Any) -> Any:
@@ -84,7 +91,7 @@ def _json_loads(value: str | None, fallback: Any) -> Any:
         return fallback
     try:
         return json.loads(value)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         return fallback
 
 
@@ -127,9 +134,11 @@ def _round_minutes(value: float | None) -> float | None:
     return round(value, 1)
 
 
-def _latest_watchlist_snapshot_ts(conn: sqlite3.Connection) -> str | None:
-    row = conn.execute("SELECT MAX(snapshot_ts) AS snapshot_ts FROM watchlist_candidates").fetchone()
-    return row["snapshot_ts"] if row else None
+def _latest_watchlist_snapshot_ts(conn: PgConn) -> str | None:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT MAX(snapshot_ts) AS snapshot_ts FROM watchlist_candidates")
+        row = cur.fetchone()
+        return row["snapshot_ts"] if row else None
 
 
 def _scanner_scope_cte() -> str:
@@ -138,94 +147,107 @@ def _scanner_scope_cte() -> str:
         SELECT *
         FROM markets
         WHERE active = 1 AND closed = 0
-        ORDER BY rowid DESC
-        LIMIT :market_limit
+        ORDER BY ctid DESC
+        LIMIT %(market_limit)s
     )
     """
 
 
-def _history_ready_count(conn: sqlite3.Connection, *, market_limit: int, hours: int) -> int:
-    row = conn.execute(
-        f"""
-        {_scanner_scope_cte()},
-        latest AS (
-            SELECT ms.condition_id, MAX(ms.snapshot_ts) AS latest_snapshot_ts
-            FROM market_snapshots ms
-            JOIN scanner_scope s ON s.condition_id = ms.condition_id
-            GROUP BY ms.condition_id
+def _history_ready_count(conn: PgConn, *, market_limit: int, hours: int) -> int:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            {_scanner_scope_cte()},
+            latest AS (
+                SELECT ms.condition_id, MAX(ms.snapshot_ts) AS latest_snapshot_ts
+                FROM market_snapshots ms
+                JOIN scanner_scope s ON s.condition_id = ms.condition_id
+                GROUP BY ms.condition_id
+            )
+            SELECT COUNT(*) AS n
+            FROM latest
+            WHERE EXISTS (
+                SELECT 1
+                FROM market_snapshots ms
+                WHERE ms.condition_id = latest.condition_id
+                  AND ms.snapshot_ts <= (latest.latest_snapshot_ts::timestamp - interval '1 hour' * %(hours)s)::text
+            )
+            """,
+            {"market_limit": market_limit, "hours": hours},
         )
-        SELECT COUNT(*) AS n
-        FROM latest
-        WHERE EXISTS (
-            SELECT 1
-            FROM market_snapshots ms
-            WHERE ms.condition_id = latest.condition_id
-              AND ms.snapshot_ts <= datetime(latest.latest_snapshot_ts, :offset)
-        )
-        """,
-        {"market_limit": market_limit, "offset": f"-{hours} hours"},
-    ).fetchone()
-    return int(row["n"]) if row else 0
+        row = cur.fetchone()
+        return int(row["n"]) if row else 0
 
 
-def _overview_payload(conn: sqlite3.Connection, settings: Settings) -> OverviewResponse:
-    snapshot_bounds = conn.execute(
-        """
-        SELECT
-            MIN(snapshot_ts) AS first_snapshot_ts,
-            MAX(snapshot_ts) AS latest_snapshot_ts
-        FROM market_snapshots
-        """
-    ).fetchone()
+def _overview_payload(conn: PgConn, settings: Settings) -> OverviewResponse:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+                MIN(snapshot_ts) AS first_snapshot_ts,
+                MAX(snapshot_ts) AS latest_snapshot_ts
+            FROM market_snapshots
+            """
+        )
+        snapshot_bounds = cur.fetchone()
     first_snapshot_ts = snapshot_bounds["first_snapshot_ts"] if snapshot_bounds else None
     latest_snapshot_ts = snapshot_bounds["latest_snapshot_ts"] if snapshot_bounds else None
     latest_watchlist_snapshot_ts = _latest_watchlist_snapshot_ts(conn)
 
-    markets_discovered = int(conn.execute("SELECT COUNT(*) AS n FROM markets").fetchone()["n"])
-    active_scanner_scope = int(
-        conn.execute(
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM markets")
+        markets_discovered = int(cur.fetchone()["n"])
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
             f"""
             {_scanner_scope_cte()}
             SELECT COUNT(*) AS n FROM scanner_scope
             """,
             {"market_limit": settings.market_limit},
-        ).fetchone()["n"]
-    )
+        )
+        active_scanner_scope = int(cur.fetchone()["n"])
+
     watchlist_candidates = 0
     if latest_watchlist_snapshot_ts:
-        watchlist_candidates = int(
-            conn.execute(
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
                 """
                 SELECT COUNT(*) AS n
                 FROM watchlist_candidates
-                WHERE snapshot_ts = ?
+                WHERE snapshot_ts = %s
                 """,
                 (latest_watchlist_snapshot_ts,),
-            ).fetchone()["n"]
-        )
-    alerts_count = int(conn.execute("SELECT COUNT(*) AS n FROM alerts").fetchone()["n"])
+            )
+            watchlist_candidates = int(cur.fetchone()["n"])
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM alerts")
+        alerts_count = int(cur.fetchone()["n"])
 
     backtestable = {}
     for hours in DEFAULT_BACKTEST_HORIZONS:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS n
-            FROM alerts a
-            LEFT JOIN markets m ON m.condition_id = a.condition_id
-            WHERE a.alert_ts <= datetime('now', ?)
-              AND (
-                m.yes_token_id IS NOT NULL
-                OR EXISTS (
-                    SELECT 1
-                    FROM market_snapshots ms
-                    WHERE ms.condition_id = a.condition_id
-                      AND ms.snapshot_ts >= a.alert_ts
-                )
-              )
-            """,
-            (f"-{hours} hours",),
-        ).fetchone()
-        backtestable[hours] = int(row["n"]) if row else 0
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM alerts a
+                LEFT JOIN markets m ON m.condition_id = a.condition_id
+                WHERE a.alert_ts <= (NOW() AT TIME ZONE 'UTC' - interval '1 hour' * %s)::text
+                  AND (
+                    m.yes_token_id IS NOT NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM market_snapshots ms
+                        WHERE ms.condition_id = a.condition_id
+                          AND ms.snapshot_ts >= a.alert_ts
+                    )
+                  )
+                """,
+                (hours,),
+            )
+            row = cur.fetchone()
+            backtestable[hours] = int(row["n"]) if row else 0
 
     return OverviewResponse(
         generated_at=utc_now_iso(),
@@ -247,12 +269,12 @@ def _overview_payload(conn: sqlite3.Connection, settings: Settings) -> OverviewR
     )
 
 
-def get_overview(conn: sqlite3.Connection, settings: Settings) -> OverviewResponse:
+def get_overview(conn: PgConn, settings: Settings) -> OverviewResponse:
     return _overview_payload(conn, settings)
 
 
 def list_markets(
-    conn: sqlite3.Connection,
+    conn: PgConn,
     settings: Settings,
     *,
     search: str | None = None,
@@ -267,7 +289,7 @@ def list_markets(
     params: Dict[str, Any] = {"limit": limit, "offset": offset}
 
     if search:
-        filters.append("(LOWER(base.title) LIKE :search OR LOWER(COALESCE(base.category, '')) LIKE :search)")
+        filters.append("(LOWER(base.title) LIKE %(search)s OR LOWER(COALESCE(base.category, '')) LIKE %(search)s)")
         params["search"] = f"%{search.lower()}%"
     if status == "open":
         filters.append("base.active = 1 AND base.closed = 0")
@@ -359,21 +381,21 @@ def list_markets(
                 FROM market_snapshots ms6
                 WHERE ms6.condition_id = s.condition_id
                   AND ls.snapshot_ts IS NOT NULL
-                  AND ms6.snapshot_ts <= datetime(ls.snapshot_ts, '-6 hours')
+                  AND ms6.snapshot_ts <= (ls.snapshot_ts::timestamp - interval '6 hours')::text
             ) AS history_ready_6,
             EXISTS (
                 SELECT 1
                 FROM market_snapshots ms24
                 WHERE ms24.condition_id = s.condition_id
                   AND ls.snapshot_ts IS NOT NULL
-                  AND ms24.snapshot_ts <= datetime(ls.snapshot_ts, '-24 hours')
+                  AND ms24.snapshot_ts <= (ls.snapshot_ts::timestamp - interval '24 hours')::text
             ) AS history_ready_24,
             EXISTS (
                 SELECT 1
                 FROM market_snapshots ms72
                 WHERE ms72.condition_id = s.condition_id
                   AND ls.snapshot_ts IS NOT NULL
-                  AND ms72.snapshot_ts <= datetime(ls.snapshot_ts, '-72 hours')
+                  AND ms72.snapshot_ts <= (ls.snapshot_ts::timestamp - interval '72 hours')::text
             ) AS history_ready_72,
             CASE WHEN cw.condition_id IS NULL THEN 0 ELSE 1 END AS watchlist_flag,
             COALESCE(cw.warmup_only, 0) AS warmup_only,
@@ -390,8 +412,8 @@ def list_markets(
     )
     """
 
-    total = int(
-        conn.execute(
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
             f"""
             {base_sql}
             SELECT COUNT(*) AS n
@@ -399,20 +421,22 @@ def list_markets(
             {where_sql}
             """,
             params,
-        ).fetchone()["n"]
-    )
+        )
+        total = int(cur.fetchone()["n"])
 
-    rows = conn.execute(
-        f"""
-        {base_sql}
-        SELECT *
-        FROM base
-        {where_sql}
-        ORDER BY {order_by}
-        LIMIT :limit OFFSET :offset
-        """,
-        params,
-    ).fetchall()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            {base_sql}
+            SELECT *
+            FROM base
+            {where_sql}
+            ORDER BY {order_by}
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
 
     items = [
         MarketSummary(
@@ -446,7 +470,7 @@ def list_markets(
 
 
 def get_watchlist(
-    conn: sqlite3.Connection,
+    conn: PgConn,
     *,
     warmup_only: bool | None = None,
     limit: int = 100,
@@ -455,7 +479,7 @@ def get_watchlist(
     if not snapshot_ts:
         return WatchlistResponse(snapshot_ts=None, total=0, items=[])
 
-    filters = ["wc.snapshot_ts = :snapshot_ts"]
+    filters = ["wc.snapshot_ts = %(snapshot_ts)s"]
     params: Dict[str, Any] = {"snapshot_ts": snapshot_ts, "limit": limit}
     if warmup_only is True:
         filters.append("wc.warmup_only = 1")
@@ -463,22 +487,26 @@ def get_watchlist(
         filters.append("wc.warmup_only = 0")
 
     where_sql = " AND ".join(filters)
-    total = int(
-        conn.execute(
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
             f"SELECT COUNT(*) AS n FROM watchlist_candidates wc WHERE {where_sql}",
             params,
-        ).fetchone()["n"]
-    )
-    rows = conn.execute(
-        f"""
-        SELECT wc.*
-        FROM watchlist_candidates wc
-        WHERE {where_sql}
-        ORDER BY wc.trade_enriched DESC, wc.history_ready_6h DESC, wc.price_anomaly_hit DESC, wc.market_title ASC
-        LIMIT :limit
-        """,
-        params,
-    ).fetchall()
+        )
+        total = int(cur.fetchone()["n"])
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT wc.*
+            FROM watchlist_candidates wc
+            WHERE {where_sql}
+            ORDER BY wc.trade_enriched DESC, wc.history_ready_6h DESC, wc.price_anomaly_hit DESC, wc.market_title ASC
+            LIMIT %(limit)s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
 
     items = [
         WatchlistCandidateResponse(
@@ -502,14 +530,17 @@ def get_watchlist(
     ]
 
     if items:
-        market_rows = conn.execute(
-            f"""
-            SELECT condition_id, event_slug, slug
-            FROM markets
-            WHERE condition_id IN ({",".join("?" for _ in items)})
-            """,
-            tuple(item.condition_id for item in items),
-        ).fetchall()
+        placeholders = ",".join("%s" for _ in items)
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"""
+                SELECT condition_id, event_slug, slug
+                FROM markets
+                WHERE condition_id IN ({placeholders})
+                """,
+                tuple(item.condition_id for item in items),
+            )
+            market_rows = cur.fetchall()
         urls = {
             row["condition_id"]: build_market_url(row["event_slug"], row["slug"])
             for row in market_rows
@@ -520,7 +551,7 @@ def get_watchlist(
 
 
 def list_alerts(
-    conn: sqlite3.Connection,
+    conn: PgConn,
     *,
     severity: str | None = None,
     confidence: str | None = None,
@@ -533,33 +564,39 @@ def list_alerts(
     filters: List[str] = []
     params: Dict[str, Any] = {"limit": limit, "offset": offset}
     if severity:
-        filters.append("severity = :severity")
+        filters.append("severity = %(severity)s")
         params["severity"] = severity
     if confidence:
-        filters.append("confidence = :confidence")
+        filters.append("confidence = %(confidence)s")
         params["confidence"] = confidence
     if alert_type:
-        filters.append("alert_type = :alert_type")
+        filters.append("alert_type = %(alert_type)s")
         params["alert_type"] = alert_type
     if condition_id:
-        filters.append("condition_id = :condition_id")
+        filters.append("condition_id = %(condition_id)s")
         params["condition_id"] = condition_id
     if hours is not None:
-        filters.append("alert_ts >= datetime('now', :hours_offset)")
-        params["hours_offset"] = f"-{hours} hours"
+        filters.append("alert_ts >= (NOW() AT TIME ZONE 'UTC' - interval '1 hour' * %(hours)s)::text")
+        params["hours"] = hours
     where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
 
-    total = int(conn.execute(f"SELECT COUNT(*) AS n FROM alerts {where_sql}", params).fetchone()["n"])
-    rows = conn.execute(
-        f"""
-        SELECT *
-        FROM alerts
-        {where_sql}
-        ORDER BY alert_ts DESC, id DESC
-        LIMIT :limit OFFSET :offset
-        """,
-        params,
-    ).fetchall()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(f"SELECT COUNT(*) AS n FROM alerts {where_sql}", params)
+        total = int(cur.fetchone()["n"])
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT *
+            FROM alerts
+            {where_sql}
+            ORDER BY alert_ts DESC, id DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
     return AlertsResponse(
         total=total,
         items=[
@@ -593,76 +630,79 @@ def list_alerts(
     )
 
 
-def get_market_detail(conn: sqlite3.Connection, condition_id: str) -> MarketDetailResponse | None:
-    row = conn.execute(
-        """
-        WITH latest_snapshot AS (
-            SELECT *
-            FROM market_snapshots
-            WHERE condition_id = :condition_id
-            ORDER BY snapshot_ts DESC
-            LIMIT 1
-        ),
-        latest_watchlist_cycle AS (
-            SELECT MAX(snapshot_ts) AS snapshot_ts FROM watchlist_candidates
-        ),
-        current_watchlist AS (
-            SELECT *
-            FROM watchlist_candidates
-            WHERE condition_id = :condition_id
-              AND snapshot_ts = (SELECT snapshot_ts FROM latest_watchlist_cycle)
-        ),
-        latest_alert AS (
-            SELECT alert_ts, severity
-            FROM alerts
-            WHERE condition_id = :condition_id
-            ORDER BY alert_ts DESC, id DESC
-            LIMIT 1
+def get_market_detail(conn: PgConn, condition_id: str) -> MarketDetailResponse | None:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            WITH latest_snapshot AS (
+                SELECT *
+                FROM market_snapshots
+                WHERE condition_id = %(condition_id)s
+                ORDER BY snapshot_ts DESC
+                LIMIT 1
+            ),
+            latest_watchlist_cycle AS (
+                SELECT MAX(snapshot_ts) AS snapshot_ts FROM watchlist_candidates
+            ),
+            current_watchlist AS (
+                SELECT *
+                FROM watchlist_candidates
+                WHERE condition_id = %(condition_id)s
+                  AND snapshot_ts = (SELECT snapshot_ts FROM latest_watchlist_cycle)
+            ),
+            latest_alert AS (
+                SELECT alert_ts, severity
+                FROM alerts
+                WHERE condition_id = %(condition_id)s
+                ORDER BY alert_ts DESC, id DESC
+                LIMIT 1
+            )
+            SELECT
+                m.*,
+                ls.yes_price AS current_yes_price,
+                ls.no_price AS current_no_price,
+                ls.yes_top5_seen_share,
+                ls.no_top5_seen_share,
+                ls.observed_holder_wallets,
+                ls.snapshot_ts AS latest_snapshot_ts,
+                EXISTS (
+                    SELECT 1 FROM market_snapshots ms
+                    WHERE ms.condition_id = m.condition_id
+                      AND ls.snapshot_ts IS NOT NULL
+                      AND ms.snapshot_ts <= (ls.snapshot_ts::timestamp - interval '6 hours')::text
+                ) AS history_ready_6,
+                EXISTS (
+                    SELECT 1 FROM market_snapshots ms
+                    WHERE ms.condition_id = m.condition_id
+                      AND ls.snapshot_ts IS NOT NULL
+                      AND ms.snapshot_ts <= (ls.snapshot_ts::timestamp - interval '24 hours')::text
+                ) AS history_ready_24,
+                EXISTS (
+                    SELECT 1 FROM market_snapshots ms
+                    WHERE ms.condition_id = m.condition_id
+                      AND ls.snapshot_ts IS NOT NULL
+                      AND ms.snapshot_ts <= (ls.snapshot_ts::timestamp - interval '72 hours')::text
+                ) AS history_ready_72,
+                CASE WHEN cw.condition_id IS NULL THEN 0 ELSE 1 END AS watchlist_flag,
+                COALESCE(cw.warmup_only, 0) AS warmup_only,
+                CASE
+                    WHEN EXISTS (SELECT 1 FROM trades t WHERE t.condition_id = m.condition_id)
+                    THEN 1 ELSE COALESCE(cw.trade_enriched, 0)
+                END AS trade_enriched,
+                cw.reason_summary AS latest_watchlist_reason_summary,
+                (SELECT COUNT(*) FROM alerts a WHERE a.condition_id = m.condition_id) AS recent_alert_count,
+                la.alert_ts AS latest_alert_ts,
+                la.severity AS latest_alert_severity
+            FROM markets m
+            LEFT JOIN latest_snapshot ls ON 1 = 1
+            LEFT JOIN current_watchlist cw ON 1 = 1
+            LEFT JOIN latest_alert la ON 1 = 1
+            WHERE m.condition_id = %(condition_id)s
+            """,
+            {"condition_id": condition_id},
         )
-        SELECT
-            m.*,
-            ls.yes_price AS current_yes_price,
-            ls.no_price AS current_no_price,
-            ls.yes_top5_seen_share,
-            ls.no_top5_seen_share,
-            ls.observed_holder_wallets,
-            ls.snapshot_ts AS latest_snapshot_ts,
-            EXISTS (
-                SELECT 1 FROM market_snapshots ms
-                WHERE ms.condition_id = m.condition_id
-                  AND ls.snapshot_ts IS NOT NULL
-                  AND ms.snapshot_ts <= datetime(ls.snapshot_ts, '-6 hours')
-            ) AS history_ready_6,
-            EXISTS (
-                SELECT 1 FROM market_snapshots ms
-                WHERE ms.condition_id = m.condition_id
-                  AND ls.snapshot_ts IS NOT NULL
-                  AND ms.snapshot_ts <= datetime(ls.snapshot_ts, '-24 hours')
-            ) AS history_ready_24,
-            EXISTS (
-                SELECT 1 FROM market_snapshots ms
-                WHERE ms.condition_id = m.condition_id
-                  AND ls.snapshot_ts IS NOT NULL
-                  AND ms.snapshot_ts <= datetime(ls.snapshot_ts, '-72 hours')
-            ) AS history_ready_72,
-            CASE WHEN cw.condition_id IS NULL THEN 0 ELSE 1 END AS watchlist_flag,
-            COALESCE(cw.warmup_only, 0) AS warmup_only,
-            CASE
-                WHEN EXISTS (SELECT 1 FROM trades t WHERE t.condition_id = m.condition_id)
-                THEN 1 ELSE COALESCE(cw.trade_enriched, 0)
-            END AS trade_enriched,
-            cw.reason_summary AS latest_watchlist_reason_summary,
-            (SELECT COUNT(*) FROM alerts a WHERE a.condition_id = m.condition_id) AS recent_alert_count,
-            la.alert_ts AS latest_alert_ts,
-            la.severity AS latest_alert_severity
-        FROM markets m
-        LEFT JOIN latest_snapshot ls ON 1 = 1
-        LEFT JOIN current_watchlist cw ON 1 = 1
-        LEFT JOIN latest_alert la ON 1 = 1
-        WHERE m.condition_id = :condition_id
-        """,
-        {"condition_id": condition_id},
-    ).fetchone()
+        row = cur.fetchone()
+
     if not row:
         return None
     return MarketDetailResponse(
@@ -705,29 +745,34 @@ def get_market_detail(conn: sqlite3.Connection, condition_id: str) -> MarketDeta
     )
 
 
-def get_market_timeseries(conn: sqlite3.Connection, condition_id: str, hours: int) -> TimeSeriesResponse:
-    latest = conn.execute(
-        """
-        SELECT MAX(snapshot_ts) AS snapshot_ts
-        FROM market_snapshots
-        WHERE condition_id = ?
-        """,
-        (condition_id,),
-    ).fetchone()
+def get_market_timeseries(conn: PgConn, condition_id: str, hours: int) -> TimeSeriesResponse:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT MAX(snapshot_ts) AS snapshot_ts
+            FROM market_snapshots
+            WHERE condition_id = %s
+            """,
+            (condition_id,),
+        )
+        latest = cur.fetchone()
     latest_snapshot_ts = latest["snapshot_ts"] if latest else None
     if not latest_snapshot_ts:
         return TimeSeriesResponse(condition_id=condition_id, hours=hours, items=[])
 
-    rows = conn.execute(
-        """
-        SELECT snapshot_ts, yes_price, no_price, yes_top5_seen_share, no_top5_seen_share, observed_holder_wallets
-        FROM market_snapshots
-        WHERE condition_id = ?
-          AND snapshot_ts >= datetime(?, ?)
-        ORDER BY snapshot_ts ASC
-        """,
-        (condition_id, latest_snapshot_ts, f"-{hours} hours"),
-    ).fetchall()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT snapshot_ts, yes_price, no_price, yes_top5_seen_share, no_top5_seen_share, observed_holder_wallets
+            FROM market_snapshots
+            WHERE condition_id = %s
+              AND snapshot_ts >= (%s::timestamp - interval '1 hour' * %s)::text
+            ORDER BY snapshot_ts ASC
+            """,
+            (condition_id, latest_snapshot_ts, hours),
+        )
+        rows = cur.fetchall()
+
     return TimeSeriesResponse(
         condition_id=condition_id,
         hours=hours,
@@ -745,43 +790,48 @@ def get_market_timeseries(conn: sqlite3.Connection, condition_id: str, hours: in
     )
 
 
-def get_market_holders(conn: sqlite3.Connection, condition_id: str, snapshot: str = "latest") -> HoldersResponse:
+def get_market_holders(conn: PgConn, condition_id: str, snapshot: str = "latest") -> HoldersResponse:
     snapshot_ts = snapshot
     if snapshot == "latest":
-        row = conn.execute(
-            """
-            SELECT MAX(snapshot_ts) AS snapshot_ts
-            FROM holder_snapshots
-            WHERE condition_id = ?
-            """,
-            (condition_id,),
-        ).fetchone()
-        snapshot_ts = row["snapshot_ts"] if row else None
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT MAX(snapshot_ts) AS snapshot_ts
+                FROM holder_snapshots
+                WHERE condition_id = %s
+                """,
+                (condition_id,),
+            )
+            row = cur.fetchone()
+            snapshot_ts = row["snapshot_ts"] if row else None
 
     if not snapshot_ts:
         return HoldersResponse(condition_id=condition_id, snapshot_ts=None, items=[])
 
-    rows = conn.execute(
-        """
-        SELECT
-            hs.snapshot_ts,
-            hs.token_id,
-            hs.wallet_address,
-            hs.amount,
-            hs.outcome_index,
-            hs.rank,
-            ws.politics_score,
-            ws.overall_score,
-            ws.politics_pnl_rank,
-            ws.overall_pnl_rank
-        FROM holder_snapshots hs
-        LEFT JOIN wallet_scores ws ON ws.wallet_address = hs.wallet_address
-        WHERE hs.condition_id = ?
-          AND hs.snapshot_ts = ?
-        ORDER BY hs.rank ASC, hs.amount DESC
-        """,
-        (condition_id, snapshot_ts),
-    ).fetchall()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+                hs.snapshot_ts,
+                hs.token_id,
+                hs.wallet_address,
+                hs.amount,
+                hs.outcome_index,
+                hs.rank,
+                ws.politics_score,
+                ws.overall_score,
+                ws.politics_pnl_rank,
+                ws.overall_pnl_rank
+            FROM holder_snapshots hs
+            LEFT JOIN wallet_scores ws ON ws.wallet_address = hs.wallet_address
+            WHERE hs.condition_id = %s
+              AND hs.snapshot_ts = %s
+            ORDER BY hs.rank ASC, hs.amount DESC
+            """,
+            (condition_id, snapshot_ts),
+        )
+        rows = cur.fetchall()
+
     return HoldersResponse(
         condition_id=condition_id,
         snapshot_ts=snapshot_ts,
@@ -803,17 +853,20 @@ def get_market_holders(conn: sqlite3.Connection, condition_id: str, snapshot: st
     )
 
 
-def get_market_trades(conn: sqlite3.Connection, condition_id: str, limit: int = 50) -> TradesResponse:
-    rows = conn.execute(
-        """
-        SELECT trade_key, trade_ts, wallet_address, side, outcome, price, size, notional, tx_hash, title
-        FROM trades
-        WHERE condition_id = ?
-        ORDER BY trade_ts DESC, trade_key DESC
-        LIMIT ?
-        """,
-        (condition_id, limit),
-    ).fetchall()
+def get_market_trades(conn: PgConn, condition_id: str, limit: int = 50) -> TradesResponse:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT trade_key, trade_ts, wallet_address, side, outcome, price, size, notional, tx_hash, title
+            FROM trades
+            WHERE condition_id = %s
+            ORDER BY trade_ts DESC, trade_key DESC
+            LIMIT %s
+            """,
+            (condition_id, limit),
+        )
+        rows = cur.fetchall()
+
     return TradesResponse(
         condition_id=condition_id,
         total=len(rows),
@@ -836,7 +889,7 @@ def get_market_trades(conn: sqlite3.Connection, condition_id: str, limit: int = 
 
 
 def get_market_trade_aftermath(
-    conn: sqlite3.Connection,
+    conn: PgConn,
     condition_id: str,
     *,
     limit: int = 10,
@@ -844,67 +897,72 @@ def get_market_trade_aftermath(
     side: str | None = "buy",
     outcome: str | None = None,
 ) -> TradeAftermathResponse:
-    filters = ["t.condition_id = :condition_id"]
+    filters = ["t.condition_id = %(condition_id)s"]
     params: Dict[str, Any] = {"condition_id": condition_id, "limit": limit}
 
     normalized_side = None if not side or side.lower() == "all" else side.lower()
     normalized_outcome = None if not outcome or outcome.lower() == "all" else outcome.title()
 
     if normalized_side:
-        filters.append("LOWER(COALESCE(t.side, '')) = :side")
+        filters.append("LOWER(COALESCE(t.side, '')) = %(side)s")
         params["side"] = normalized_side
     if normalized_outcome:
-        filters.append("COALESCE(t.outcome, '') = :outcome")
+        filters.append("COALESCE(t.outcome, '') = %(outcome)s")
         params["outcome"] = normalized_outcome
     if min_notional is not None:
-        filters.append("t.notional >= :min_notional")
+        filters.append("t.notional >= %(min_notional)s")
         params["min_notional"] = min_notional
 
     where_sql = " AND ".join(filters)
-    total = int(
-        conn.execute(
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
             f"SELECT COUNT(*) AS n FROM trades t WHERE {where_sql}",
             params,
-        ).fetchone()["n"]
-    )
+        )
+        total = int(cur.fetchone()["n"])
 
-    trade_rows = conn.execute(
-        f"""
-        SELECT
-            t.trade_key,
-            t.trade_ts,
-            t.wallet_address,
-            t.side,
-            t.outcome,
-            t.price,
-            t.size,
-            t.notional,
-            t.tx_hash,
-            t.title,
-            ws.politics_score,
-            ws.overall_score,
-            ws.politics_pnl_rank,
-            ws.overall_pnl_rank
-        FROM trades t
-        LEFT JOIN wallet_scores ws ON ws.wallet_address = t.wallet_address
-        WHERE {where_sql}
-        ORDER BY (t.notional IS NULL) ASC, t.notional DESC, t.trade_ts DESC, t.trade_key DESC
-        LIMIT :limit
-        """,
-        params,
-    ).fetchall()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT
+                t.trade_key,
+                t.trade_ts,
+                t.wallet_address,
+                t.side,
+                t.outcome,
+                t.price,
+                t.size,
+                t.notional,
+                t.tx_hash,
+                t.title,
+                ws.politics_score,
+                ws.overall_score,
+                ws.politics_pnl_rank,
+                ws.overall_pnl_rank
+            FROM trades t
+            LEFT JOIN wallet_scores ws ON ws.wallet_address = t.wallet_address
+            WHERE {where_sql}
+            ORDER BY (t.notional IS NULL) ASC, t.notional DESC, t.trade_ts DESC, t.trade_key DESC
+            LIMIT %(limit)s
+            """,
+            params,
+        )
+        trade_rows = cur.fetchall()
 
-    raw_snapshot_rows = conn.execute(
-        """
-        SELECT snapshot_ts, yes_price, no_price, yes_top5_seen_share, no_top5_seen_share, observed_holder_wallets
-        FROM market_snapshots
-        WHERE condition_id = ?
-        ORDER BY snapshot_ts ASC
-        """,
-        (condition_id,),
-    ).fetchall()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT snapshot_ts, yes_price, no_price, yes_top5_seen_share, no_top5_seen_share, observed_holder_wallets
+            FROM market_snapshots
+            WHERE condition_id = %s
+            ORDER BY snapshot_ts ASC
+            """,
+            (condition_id,),
+        )
+        raw_snapshot_rows = cur.fetchall()
 
-    snapshot_rows: List[sqlite3.Row] = []
+    snapshot_rows: List[Dict[str, Any]] = []
     snapshot_times: List[datetime] = []
     for row in raw_snapshot_rows:
         parsed_ts = _parse_db_ts(row["snapshot_ts"])
@@ -916,7 +974,7 @@ def get_market_trade_aftermath(
     latest_snapshot = snapshot_rows[-1] if snapshot_rows else None
     latest_snapshot_dt = snapshot_times[-1] if snapshot_times else None
 
-    def outcome_price(snapshot: sqlite3.Row | None, trade_outcome: str | None) -> float | None:
+    def outcome_price(snapshot: Dict[str, Any] | None, trade_outcome: str | None) -> float | None:
         if snapshot is None or not trade_outcome:
             return None
         lowered = trade_outcome.lower()
@@ -1150,15 +1208,18 @@ def get_latent_backtests(settings: Settings) -> BacktestResponse:
     return _load_backtest_response(settings.latent_backtest_csv_path, default_horizons=list(DEFAULT_LATENT_BACKTEST_HORIZONS))
 
 
-def get_system(conn: sqlite3.Connection, settings: Settings) -> SystemResponse:
-    job_rows = conn.execute(
-        """
-        SELECT id, job_name, started_at, finished_at, status, rows_written, meta_json, error_text
-        FROM job_runs
-        ORDER BY started_at DESC, id DESC
-        LIMIT 20
-        """
-    ).fetchall()
+def get_system(conn: PgConn, settings: Settings) -> SystemResponse:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT id, job_name, started_at, finished_at, status, rows_written, meta_json, error_text
+            FROM job_runs
+            ORDER BY started_at DESC, id DESC
+            LIMIT 20
+            """
+        )
+        job_rows = cur.fetchall()
+
     return SystemResponse(
         overview=_overview_payload(conn, settings),
         backtest_csv_path=str(settings.backtest_csv_path),

@@ -1,5 +1,4 @@
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
+-- PostgreSQL schema for polymarket-scanner
 
 CREATE TABLE IF NOT EXISTS events (
     event_id TEXT PRIMARY KEY,
@@ -65,7 +64,7 @@ CREATE TABLE IF NOT EXISTS wallet_scores (
 );
 
 CREATE TABLE IF NOT EXISTS wallet_score_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
     snapshot_ts TEXT NOT NULL,
     category TEXT NOT NULL,
@@ -80,7 +79,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_score_history_unique
 ON wallet_score_history(wallet_address, snapshot_ts, category, time_period, order_by);
 
 CREATE TABLE IF NOT EXISTS market_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     condition_id TEXT NOT NULL,
     snapshot_ts TEXT NOT NULL,
     yes_price REAL,
@@ -104,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_market_snapshots_condition_ts
 ON market_snapshots(condition_id, snapshot_ts);
 
 CREATE TABLE IF NOT EXISTS holder_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     condition_id TEXT NOT NULL,
     snapshot_ts TEXT NOT NULL,
     token_id TEXT NOT NULL,
@@ -141,7 +140,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts
 ON trades(wallet_address, trade_ts);
 
 CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     alert_ts TEXT NOT NULL,
     condition_id TEXT NOT NULL,
     alert_type TEXT NOT NULL,
@@ -171,7 +170,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(alert_ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_condition_ts ON alerts(condition_id, alert_ts);
 
 CREATE TABLE IF NOT EXISTS watchlist_candidates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     snapshot_ts TEXT NOT NULL,
     condition_id TEXT NOT NULL,
     market_title TEXT,
@@ -198,7 +197,7 @@ CREATE INDEX IF NOT EXISTS idx_watchlist_candidates_condition_ts
 ON watchlist_candidates(condition_id, snapshot_ts);
 
 CREATE TABLE IF NOT EXISTS job_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     job_name TEXT NOT NULL,
     started_at TEXT NOT NULL,
     finished_at TEXT,

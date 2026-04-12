@@ -46,7 +46,7 @@ DEFAULT_KEYWORDS = [
 
 @dataclass(frozen=True)
 class Settings:
-    db_path: Path = Path(os.getenv("POLY_DB_PATH", "data/polymarket.sqlite"))
+    database_url: str = os.getenv("POLY_DATABASE_URL", "postgresql://polymarket:polymarket@localhost:5432/polymarket")
     backtest_csv_path: Path = Path(os.getenv("POLY_BACKTEST_CSV_PATH", "data/backtest.csv"))
     latent_backtest_csv_path: Path = Path(os.getenv("POLY_LATENT_BACKTEST_CSV_PATH", "data/latent_backtest.csv"))
     request_timeout: float = float(os.getenv("POLY_REQUEST_TIMEOUT", "20"))
@@ -61,10 +61,6 @@ class Settings:
     telegram_bot_token: str = os.getenv("POLY_TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("POLY_TELEGRAM_CHAT_ID", "")
     user_agent: str = "polymarket-anomaly-scanner/0.1"
-
-    @property
-    def db_dir(self) -> Path:
-        return self.db_path.parent
 
 
 def get_settings() -> Settings:

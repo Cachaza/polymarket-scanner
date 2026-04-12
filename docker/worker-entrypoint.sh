@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-mkdir -p "$(dirname "${POLY_DB_PATH:-/app/data/polymarket.sqlite}")"
+
 
 attempt=1
 until polymarket-scanner init-db; do

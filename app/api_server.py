@@ -68,7 +68,7 @@ def _rows_written(result: object) -> int | None:
 
 def _run_job_action(request: JobActionRequest) -> JobActionResponse:
     action = request.action
-    db = Database(settings.db_path)
+    db = Database(settings.database_url)
     try:
         db.init_schema(get_schema_path())
         if action == "discover":
@@ -131,7 +131,7 @@ def _run_job_action(request: JobActionRequest) -> JobActionResponse:
 
 @app.get("/api/v1/overview", response_model=OverviewResponse)
 def overview() -> OverviewResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return get_overview(conn, settings)
 
 
@@ -145,7 +145,7 @@ def markets(
     limit: int = Query(default=50, ge=1, le=250),
     offset: int = Query(default=0, ge=0),
 ) -> MarketsResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return list_markets(
             conn,
             settings,
@@ -164,7 +164,7 @@ def watchlist(
     warmup_only: bool | None = None,
     limit: int = Query(default=100, ge=1, le=250),
 ) -> WatchlistResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return get_watchlist(conn, warmup_only=warmup_only, limit=limit)
 
 
@@ -178,7 +178,7 @@ def alerts(
     limit: int = Query(default=100, ge=1, le=250),
     offset: int = Query(default=0, ge=0),
 ) -> AlertsResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return list_alerts(
             conn,
             severity=severity,
@@ -193,7 +193,7 @@ def alerts(
 
 @app.get("/api/v1/markets/{condition_id}", response_model=MarketDetailResponse)
 def market_detail(condition_id: str) -> MarketDetailResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         detail = get_market_detail(conn, condition_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -202,19 +202,19 @@ def market_detail(condition_id: str) -> MarketDetailResponse:
 
 @app.get("/api/v1/markets/{condition_id}/timeseries", response_model=TimeSeriesResponse)
 def market_timeseries(condition_id: str, hours: int = Query(default=168, ge=1, le=24 * 30)) -> TimeSeriesResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return get_market_timeseries(conn, condition_id, hours)
 
 
 @app.get("/api/v1/markets/{condition_id}/holders", response_model=HoldersResponse)
 def market_holders(condition_id: str, snapshot: str = "latest") -> HoldersResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return get_market_holders(conn, condition_id, snapshot)
 
 
 @app.get("/api/v1/markets/{condition_id}/trades", response_model=TradesResponse)
 def market_trades(condition_id: str, limit: int = Query(default=50, ge=1, le=100)) -> TradesResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return get_market_trades(conn, condition_id, limit)
 
 
@@ -226,7 +226,7 @@ def market_trade_aftermath(
     side: str = Query(default="buy", pattern="^(buy|sell|all)$"),
     outcome: str = Query(default="all", pattern="^(Yes|No|all)$"),
 ) -> TradeAftermathResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return get_market_trade_aftermath(
             conn,
             condition_id,
@@ -254,7 +254,7 @@ def run_system_action(request: JobActionRequest) -> JobActionResponse:
 
 @app.get("/api/v1/system", response_model=SystemResponse)
 def system() -> SystemResponse:
-    with read_connection(settings.db_path) as conn:
+    with read_connection(settings.database_url) as conn:
         return get_system(conn, settings)
 
 

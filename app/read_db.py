@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Iterator
 
 
 @contextmanager
-def read_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
-    uri = f"file:{db_path.resolve()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=20)
-    conn.row_factory = sqlite3.Row
+def read_connection(database_url: str) -> Iterator[psycopg.Connection]:
+    conn = psycopg.connect(database_url, row_factory=dict_row)
+    conn.autocommit = True  # read-only queries; no need for transactions
     try:
         yield conn
     finally:

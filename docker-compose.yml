@@ -1,13 +1,32 @@
 services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POLY_DB_USER:-polymarket}
+      POSTGRES_PASSWORD: ${POLY_DB_PASSWORD:-polymarket}
+      POSTGRES_DB: ${POLY_DB_NAME:-polymarket}
+    volumes:
+      - scanner_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POLY_DB_USER:-polymarket} -d ${POLY_DB_NAME:-polymarket}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   api:
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
       - .env
     environment:
-      POLY_DB_PATH: /app/data/polymarket.sqlite
+      POLY_DATABASE_URL: postgresql://${POLY_DB_USER:-polymarket}:${POLY_DB_PASSWORD:-polymarket}@db:5432/${POLY_DB_NAME:-polymarket}
       POLY_BACKTEST_CSV_PATH: /app/data/backtest.csv
       POLY_LATENT_BACKTEST_CSV_PATH: /app/data/latent_backtest.csv
       POLY_API_HOST: 0.0.0.0
@@ -40,7 +59,7 @@ services:
     env_file:
       - .env
     environment:
-      POLY_DB_PATH: /app/data/polymarket.sqlite
+      POLY_DATABASE_URL: postgresql://${POLY_DB_USER:-polymarket}:${POLY_DB_PASSWORD:-polymarket}@db:5432/${POLY_DB_NAME:-polymarket}
       POLY_BACKTEST_CSV_PATH: /app/data/backtest.csv
       POLY_LATENT_BACKTEST_CSV_PATH: /app/data/latent_backtest.csv
     entrypoint:
@@ -66,9 +85,6 @@ services:
       NEXT_PUBLIC_SCANNER_API_MODE: live
     expose:
       - "3000"
-    networks:
-      - default
-      - dokploy-network
     healthcheck:
       test:
         [
@@ -81,9 +97,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    networks:
+      - default
+      - dokploy-network
 
 volumes:
   scanner_data:
+  scanner_pg_data:
 
 networks:
   dokploy-network:

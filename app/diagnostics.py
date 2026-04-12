@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict
 
+import psycopg
+from psycopg.rows import dict_row
+
 from .backtest import DEFAULT_BACKTEST_HORIZONS
 from .config import Settings
 from .db import Database
@@ -11,7 +14,7 @@ from .db import Database
 def _row_to_dict(row: Any) -> Dict[str, Any]:
     if row is None:
         return {}
-    return {key: row[key] for key in row.keys()}
+    return dict(row)
 
 
 def _parse_db_ts(value: str | None) -> datetime | None:
@@ -32,15 +35,19 @@ def _format_age(first_snapshot_ts: str | None) -> str:
     return f"{days}d {hours}h {minutes}m"
 
 
-def _count_watchlist_candidates(db: Database) -> int:
-    latest_row = db.conn.execute("SELECT MAX(snapshot_ts) AS snapshot_ts FROM watchlist_candidates").fetchone()
+def _count_watchlist_candidates(conn: psycopg.Connection) -> int:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT MAX(snapshot_ts) AS snapshot_ts FROM watchlist_candidates")
+        latest_row = cur.fetchone()
     latest_snapshot_ts = latest_row["snapshot_ts"] if latest_row else None
     if not latest_snapshot_ts:
         return 0
-    count_row = db.conn.execute(
-        "SELECT COUNT(*) AS n FROM watchlist_candidates WHERE snapshot_ts = ?",
-        (latest_snapshot_ts,),
-    ).fetchone()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM watchlist_candidates WHERE snapshot_ts = %s",
+            (latest_snapshot_ts,),
+        )
+        count_row = cur.fetchone()
     return int(count_row["n"]) if count_row else 0
 
 
@@ -62,7 +69,7 @@ def render_diagnostics(settings: Settings, db: Database) -> str:
         f"Markets with enough 6h history: {db.count_history_ready_markets(active_condition_ids, 6)}",
         f"Markets with enough 24h history: {db.count_history_ready_markets(active_condition_ids, 24)}",
         f"Markets with enough 72h history: {db.count_history_ready_markets(active_condition_ids, 72)}",
-        f"Watchlist candidates: {_count_watchlist_candidates(db)}",
+        f"Watchlist candidates: {_count_watchlist_candidates(db.conn)}",
         f"Alerts count: {len(alerts)}",
     ]
     for hours in DEFAULT_BACKTEST_HORIZONS:

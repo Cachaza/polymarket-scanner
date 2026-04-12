@@ -67,11 +67,11 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    db = Database(settings.db_path)
+    db = Database(settings.database_url)
     try:
         db.init_schema(get_schema_path())
         if args.command == "init-db":
-            print(f"Initialized DB at {settings.db_path}")
+            print(f"Initialized DB at {settings.database_url}")
             return
 
         if args.command == "discover":
