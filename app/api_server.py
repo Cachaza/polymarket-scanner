@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
@@ -45,7 +48,27 @@ from .read_service import (
 from .schema import get_schema_path
 
 settings = get_settings()
-app = FastAPI(title="Polymarket Scanner API", version="0.1.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Apply schema migrations on every startup (idempotent)."""
+    logger.info("Applying database schema...")
+    db = Database(settings.database_url)
+    try:
+        db.init_schema(get_schema_path())
+        db.commit()
+        logger.info("Schema applied successfully.")
+    except Exception:
+        logger.exception("Failed to apply schema on startup")
+        raise
+    finally:
+        db.close()
+    yield
+
+
+app = FastAPI(title="Polymarket Scanner API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
