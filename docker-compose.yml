@@ -66,6 +66,9 @@ services:
       NEXT_PUBLIC_SCANNER_API_MODE: live
     expose:
       - "3000"
+    networks:
+      - default
+      - dokploy-network
     healthcheck:
       test:
         [
@@ -81,3 +84,7 @@ services:
 
 volumes:
   scanner_data:
+
+networks:
+  dokploy-network:
+    external: true
