@@ -89,6 +89,7 @@ This repo now includes a local read-only scanner console:
 - a small FastAPI layer over the SQLite database
 - a Next.js app in `web/`
 - persisted `watchlist_candidates` history
+- persisted `recommendations` history
 - tracked `job_runs` for discover / refresh / snapshot / score-alerts / backtest
 
 ### Start the API
@@ -103,6 +104,7 @@ The API serves these read endpoints under `/api/v1`:
 - `/markets`
 - `/watchlist`
 - `/alerts`
+- `/recommendations`
 - `/markets/{condition_id}`
 - `/markets/{condition_id}/timeseries`
 - `/markets/{condition_id}/holders`

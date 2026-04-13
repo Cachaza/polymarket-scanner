@@ -196,6 +196,37 @@ ON watchlist_candidates(snapshot_ts);
 CREATE INDEX IF NOT EXISTS idx_watchlist_candidates_condition_ts
 ON watchlist_candidates(condition_id, snapshot_ts);
 
+CREATE TABLE IF NOT EXISTS recommendations (
+    id SERIAL PRIMARY KEY,
+    entry_ts TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    market_title TEXT,
+    market_url TEXT,
+    side TEXT NOT NULL DEFAULT 'Yes',
+    recommendation TEXT NOT NULL,
+    status TEXT NOT NULL,
+    conviction_score REAL NOT NULL DEFAULT 0,
+    severity TEXT,
+    confidence TEXT,
+    reason_summary TEXT,
+    entry_yes_price REAL,
+    history_ready_6h INTEGER NOT NULL DEFAULT 0,
+    warmup_only INTEGER NOT NULL DEFAULT 0,
+    trade_enriched INTEGER NOT NULL DEFAULT 0,
+    source_meta_json TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recommendations_unique
+ON recommendations(condition_id, source, entry_ts);
+
+CREATE INDEX IF NOT EXISTS idx_recommendations_condition_ts
+ON recommendations(condition_id, entry_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_recommendations_source_ts
+ON recommendations(source, entry_ts DESC);
+
 CREATE TABLE IF NOT EXISTS job_runs (
     id SERIAL PRIMARY KEY,
     job_name TEXT NOT NULL,

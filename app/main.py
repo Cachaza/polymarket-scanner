@@ -45,7 +45,7 @@ def _rows_written_for(job_name: str, result: object) -> int | None:
         return len(result)
     if not isinstance(result, dict):
         return None
-    for key in ("markets", "wallet_score_rows", "new_alerts", "watchlist_candidates", "events"):
+    for key in ("markets", "wallet_score_rows", "new_alerts", "watchlist_candidates", "recommendations", "events"):
         value = result.get(key)
         if isinstance(value, int):
             return value

@@ -4,6 +4,7 @@ import logging
 from ..alerts.telegram import send_telegram_message
 from ..config import Settings
 from ..db import Database
+from ..recommendations import recommendation_from_alert
 from ..scoring import score_market
 from ..utils import build_market_url, utc_now_iso
 
@@ -58,6 +59,7 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
         )
         if alert is not None:
             db.insert_alert(alert, alert_ts)
+            db.insert_recommendation(recommendation_from_alert(alert, alert_ts=alert_ts))
             inserted_alerts += 1
 
     db.commit()
@@ -93,5 +95,6 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
         "history_ready": history_ready_count,
         "warmup_skipped": warmup_skipped_count,
         "new_alerts": inserted_alerts,
+        "recommendations": inserted_alerts,
         "sent_alerts": sent_count,
     }

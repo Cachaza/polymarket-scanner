@@ -12,6 +12,7 @@ from ..clients.data_api import DataAPIClient
 from ..config import Settings
 from ..db import Database
 from ..extract import build_holder_rows
+from ..recommendations import recommendation_from_watchlist
 from ..utils import chunked, synthetic_trade_key, utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -250,6 +251,7 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
         wallet_scores = db.get_wallet_scores(all_holder_wallets)
 
         watchlist_condition_ids: List[str] = []
+        watchlist_rows: Dict[str, Dict[str, Any]] = {}
         price_anomaly_count = 0
         holder_concentration_count = 0
         wallet_quality_count = 0
@@ -304,46 +306,49 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
                     watchlist_history_ready_count += 1
                 else:
                     watchlist_warmup_count += 1
-                db.insert_watchlist_candidate(
-                    {
-                        "snapshot_ts": snapshot_ts,
-                        "condition_id": market["condition_id"],
-                        "market_title": market["title"],
-                        "current_yes_price": snapshot.get("yes_price"),
-                        "price_delta_6h": (
-                            snapshot["yes_price"] - prev_snapshot["yes_price"]
-                            if prev_snapshot
-                            and prev_snapshot["yes_price"] is not None
-                            and snapshot["yes_price"] is not None
-                            else None
-                        ),
-                        "yes_top5_seen_share": snapshot.get("yes_top5_seen_share"),
-                        "price_anomaly_hit": price_anomaly_pass,
-                        "holder_concentration_hit": holder_concentration_pass,
-                        "wallet_quality_hit": wallet_quality_pass,
-                        "warmup_only": not history_ready_6h,
+                watchlist_row = {
+                    "snapshot_ts": snapshot_ts,
+                    "condition_id": market["condition_id"],
+                    "market_title": market["title"],
+                    "market_url": market.get("market_url"),
+                    "current_yes_price": snapshot.get("yes_price"),
+                    "price_delta_6h": (
+                        snapshot["yes_price"] - prev_snapshot["yes_price"]
+                        if prev_snapshot
+                        and prev_snapshot["yes_price"] is not None
+                        and snapshot["yes_price"] is not None
+                        else None
+                    ),
+                    "yes_top5_seen_share": snapshot.get("yes_top5_seen_share"),
+                    "price_anomaly_hit": price_anomaly_pass,
+                    "holder_concentration_hit": holder_concentration_pass,
+                    "wallet_quality_hit": wallet_quality_pass,
+                    "warmup_only": not history_ready_6h,
+                    "history_ready_6h": history_ready_6h,
+                    "trade_enriched": False,
+                    "reason_summary": _watchlist_reason_summary(
+                        price_anomaly_hit=price_anomaly_pass,
+                        holder_concentration_hit=holder_concentration_pass,
+                        wallet_quality_hit=wallet_quality_pass,
+                        history_ready_6h=history_ready_6h,
+                    ),
+                    "component_flags_json": {
+                        "price_anomaly": price_anomaly_pass,
+                        "holder_concentration": holder_concentration_pass,
+                        "wallet_quality": wallet_quality_pass,
                         "history_ready_6h": history_ready_6h,
-                        "trade_enriched": False,
-                        "reason_summary": _watchlist_reason_summary(
-                            price_anomaly_hit=price_anomaly_pass,
-                            holder_concentration_hit=holder_concentration_pass,
-                            wallet_quality_hit=wallet_quality_pass,
-                            history_ready_6h=history_ready_6h,
-                        ),
-                        "component_flags_json": {
-                            "price_anomaly": price_anomaly_pass,
-                            "holder_concentration": holder_concentration_pass,
-                            "wallet_quality": wallet_quality_pass,
-                            "history_ready_6h": history_ready_6h,
-                        },
-                    }
-                )
+                    },
+                }
+                watchlist_rows[market["condition_id"]] = watchlist_row
+                db.insert_watchlist_candidate(watchlist_row)
 
         # Enrich watchlist candidates, including warm-up markets, to build context cheaply.
         enriched_condition_ids = watchlist_condition_ids[:TRADE_ENRICHMENT_LIMIT]
         for condition_id in enriched_condition_ids:
             trades = data_api.get_trades(markets=[condition_id], limit=50, offset=0, taker_only=True)
             db.insert_trades(_normalize_trade_rows(trades))
+            if condition_id in watchlist_rows:
+                watchlist_rows[condition_id]["trade_enriched"] = True
             db.conn.execute(
                 '''
                 UPDATE watchlist_candidates
@@ -352,6 +357,9 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
                 ''',
                 (condition_id, snapshot_ts),
             )
+
+        for row in watchlist_rows.values():
+            db.insert_recommendation(recommendation_from_watchlist(row))
 
         db.commit()
         logger.info(
@@ -375,6 +383,7 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
             "holder_rows": len(holder_rows_to_insert),
             "watchlist_candidates": len(watchlist_condition_ids),
             "trade_enriched": len(enriched_condition_ids),
+            "recommendations": len(watchlist_rows),
         }
     finally:
         clob.close()

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
 from .models import Alert, MarketRecord
+from .recommendations import recommendation_from_alert, recommendation_from_watchlist
 from .utils import safe_json_dumps, utc_now_iso
 
 
@@ -126,6 +127,40 @@ class Database:
                     reason_summary = COALESCE(reason_summary, summary)
                 """
             )
+
+        recommendation_columns = {
+            "entry_ts": "TEXT",
+            "condition_id": "TEXT",
+            "source": "TEXT",
+            "market_title": "TEXT",
+            "market_url": "TEXT",
+            "side": "TEXT",
+            "recommendation": "TEXT",
+            "status": "TEXT",
+            "conviction_score": "REAL NOT NULL DEFAULT 0",
+            "severity": "TEXT",
+            "confidence": "TEXT",
+            "reason_summary": "TEXT",
+            "entry_yes_price": "REAL",
+            "history_ready_6h": "INTEGER NOT NULL DEFAULT 0",
+            "warmup_only": "INTEGER NOT NULL DEFAULT 0",
+            "trade_enriched": "INTEGER NOT NULL DEFAULT 0",
+            "source_meta_json": "TEXT",
+            "created_at": "TEXT",
+        }
+        for column_name, definition in recommendation_columns.items():
+            self._ensure_column("recommendations", column_name, definition)
+
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE recommendations
+                SET created_at = COALESCE(created_at, entry_ts, %s)
+                """,
+                (utc_now_iso(),),
+            )
+
+        self._backfill_recommendations_if_empty()
 
     def upsert_event(self, event: Dict[str, Any]) -> None:
         with self.conn.cursor() as cur:
@@ -582,6 +617,71 @@ class Database:
     def get_holder_addresses_before_hours(self, condition_id: str, hours: int) -> List[str]:
         return self.get_holder_addresses_before(condition_id, utc_now_iso(), hours)
 
+    def _backfill_recommendations_if_empty(self) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM recommendations")
+            recommendation_count = int(cur.fetchone()["n"] or 0)
+        if recommendation_count > 0:
+            return
+
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    wc.*,
+                    COALESCE(
+                        m.market_url,
+                        CASE
+                            WHEN COALESCE(m.event_slug, m.slug) IS NOT NULL
+                            THEN 'https://polymarket.com/event/' || COALESCE(m.event_slug, m.slug)
+                        END
+                    ) AS market_url
+                FROM watchlist_candidates wc
+                LEFT JOIN markets m ON m.condition_id = wc.condition_id
+                ORDER BY wc.snapshot_ts ASC, wc.condition_id ASC
+                """
+            )
+            watchlist_rows = list(cur.fetchall())
+        for row in watchlist_rows:
+            payload = dict(row)
+            payload["component_flags_json"] = row.get("component_flags_json")
+            self.insert_recommendation(recommendation_from_watchlist(payload))
+
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM alerts
+                ORDER BY alert_ts ASC, id ASC
+                """
+            )
+            alert_rows = list(cur.fetchall())
+        for row in alert_rows:
+            alert = Alert(
+                condition_id=row["condition_id"],
+                alert_type=row["alert_type"],
+                score=row["score"],
+                score_total=row["score_total"],
+                score_price_anomaly=row["score_price_anomaly"],
+                score_holder_concentration=row["score_holder_concentration"],
+                score_wallet_quality=row["score_wallet_quality"],
+                score_trade_flow=row["score_trade_flow"],
+                market_title=row["market_title"],
+                market_url=row["market_url"],
+                yes_token_id=row["yes_token_id"],
+                current_yes_price=row["current_yes_price"],
+                price_delta_6h=row["price_delta_6h"],
+                price_delta_24h=row["price_delta_24h"],
+                price_delta_72h=row["price_delta_72h"],
+                severity=row["severity"],
+                confidence=row["confidence"],
+                action_label=row["action_label"],
+                reason_summary=row["reason_summary"] or row["summary"],
+                summary=row["summary"],
+                reasons_json=row["reasons_json"],
+            )
+            self.insert_recommendation(recommendation_from_alert(alert, alert_ts=row["alert_ts"]))
+
     def insert_alert(self, alert: Alert, alert_ts: str) -> None:
         with self.conn.cursor() as cur:
             cur.execute(
@@ -617,6 +717,53 @@ class Database:
                     alert.reason_summary,
                     alert.summary,
                     alert.reasons_json,
+                ),
+            )
+
+    def insert_recommendation(self, row: Dict[str, Any]) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO recommendations (
+                    entry_ts, condition_id, source, market_title, market_url, side, recommendation,
+                    status, conviction_score, severity, confidence, reason_summary, entry_yes_price,
+                    history_ready_6h, warmup_only, trade_enriched, source_meta_json, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (condition_id, source, entry_ts) DO UPDATE SET
+                    market_title=EXCLUDED.market_title,
+                    market_url=EXCLUDED.market_url,
+                    side=EXCLUDED.side,
+                    recommendation=EXCLUDED.recommendation,
+                    status=EXCLUDED.status,
+                    conviction_score=EXCLUDED.conviction_score,
+                    severity=EXCLUDED.severity,
+                    confidence=EXCLUDED.confidence,
+                    reason_summary=EXCLUDED.reason_summary,
+                    entry_yes_price=EXCLUDED.entry_yes_price,
+                    history_ready_6h=EXCLUDED.history_ready_6h,
+                    warmup_only=EXCLUDED.warmup_only,
+                    trade_enriched=EXCLUDED.trade_enriched,
+                    source_meta_json=EXCLUDED.source_meta_json
+                """,
+                (
+                    row["entry_ts"],
+                    row["condition_id"],
+                    row["source"],
+                    row.get("market_title"),
+                    row.get("market_url"),
+                    row.get("side", "Yes"),
+                    row["recommendation"],
+                    row["status"],
+                    row.get("conviction_score", 0.0),
+                    row.get("severity"),
+                    row.get("confidence"),
+                    row.get("reason_summary"),
+                    row.get("entry_yes_price"),
+                    int(bool(row.get("history_ready_6h"))),
+                    int(bool(row.get("warmup_only"))),
+                    int(bool(row.get("trade_enriched"))),
+                    row.get("source_meta_json") or safe_json_dumps({}),
+                    row.get("created_at") or utc_now_iso(),
                 ),
             )
 
