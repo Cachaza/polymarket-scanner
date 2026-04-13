@@ -8,7 +8,13 @@ from app.api_server import app
 from app.backtest import run_latent_entry_backtest
 from app.config import Settings
 from app.db import Database
-from app.read_service import get_market_trade_aftermath, get_overview, get_watchlist, list_alerts
+from app.read_service import (
+    get_market_trade_aftermath,
+    get_overview,
+    get_watchlist,
+    list_alerts,
+    list_recommendations,
+)
 
 
 def _build_fixture_db(tmp_path: Path) -> Settings:
@@ -492,6 +498,76 @@ def test_read_service_alerts_accept_structured_reasons_json(tmp_path: Path) -> N
     assert alerts.items[0].reasons == ["price anomaly", "wallet quality"]
 
 
+def test_read_service_recommendations_include_settled_feedback(tmp_path: Path) -> None:
+    settings = _build_fixture_db(tmp_path)
+    db = Database(settings.db_path)
+    try:
+        db.conn.execute(
+            """
+            INSERT INTO market_snapshots (
+                condition_id, snapshot_ts, yes_price, no_price, yes_side, no_side, yes_holder_count, no_holder_count,
+                yes_top_holder_amount, no_top_holder_amount, yes_top5_seen_share, no_top5_seen_share, observed_holder_wallets, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("cond-2", "2026-04-08 02:00:00", 1.0, 0.0, "buy", "sell", 10, 6, 300, 20, 0.82, 0.18, 18, "{}"),
+        )
+        db.conn.execute(
+            """
+            INSERT INTO alerts (
+                alert_ts, condition_id, alert_type, score, score_total, score_price_anomaly,
+                score_holder_concentration, score_wallet_quality, score_trade_flow, market_title,
+                market_url, yes_token_id, current_yes_price, price_delta_6h, price_delta_24h,
+                price_delta_72h, severity, confidence, action_label, reason_summary, summary, reasons_json, sent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-04-07 20:00:00",
+                "cond-2",
+                "smart_money",
+                9.1,
+                9.1,
+                3.0,
+                2.0,
+                2.1,
+                2.0,
+                "Closed Fixture Market",
+                "https://polymarket.com/event/event-slug",
+                "yes-token-2",
+                0.62,
+                0.11,
+                0.19,
+                None,
+                "high",
+                "high",
+                "Monitor",
+                "strong wallets accumulated before resolution",
+                "Closed fixture summary",
+                '{"reasons":["strong wallets accumulated before resolution"]}',
+                0,
+            ),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    from app.read_db import read_connection
+
+    with read_connection(settings.db_path) as conn:
+        recommendations = list_recommendations(conn, limit=10)
+
+    assert recommendations.total == 2
+    assert recommendations.actionable == 1
+    assert recommendations.settled == 1
+    open_item = next(item for item in recommendations.items if item.condition_id == "cond-1")
+    settled_item = next(item for item in recommendations.items if item.condition_id == "cond-2")
+    assert open_item.recommendation == "consider_yes"
+    assert open_item.status == "actionable"
+    assert settled_item.status == "settled"
+    assert settled_item.final_yes_price == 1.0
+    assert settled_item.outcome_verdict == "good_call"
+    assert settled_item.outcome_return == 0.6129
+
+
 def test_api_serializes_overview_and_market_detail(tmp_path: Path, monkeypatch) -> None:
     settings = _build_fixture_db(tmp_path)
     monkeypatch.setattr("app.api_server.settings", settings)
@@ -564,6 +640,74 @@ def test_api_alerts_endpoint_handles_structured_reasons_json(tmp_path: Path, mon
     payload = response.json()
     assert payload["total"] == 1
     assert payload["items"][0]["reasons"] == ["price anomaly", "wallet quality"]
+
+
+def test_api_recommendations_endpoint_returns_open_and_settled_items(tmp_path: Path, monkeypatch) -> None:
+    settings = _build_fixture_db(tmp_path)
+    db = Database(settings.db_path)
+    try:
+        db.conn.execute(
+            """
+            INSERT INTO market_snapshots (
+                condition_id, snapshot_ts, yes_price, no_price, yes_side, no_side, yes_holder_count, no_holder_count,
+                yes_top_holder_amount, no_top_holder_amount, yes_top5_seen_share, no_top5_seen_share, observed_holder_wallets, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("cond-2", "2026-04-08 02:00:00", 0.0, 1.0, "buy", "sell", 9, 11, 40, 250, 0.24, 0.76, 19, "{}"),
+        )
+        db.conn.execute(
+            """
+            INSERT INTO alerts (
+                alert_ts, condition_id, alert_type, score, score_total, score_price_anomaly,
+                score_holder_concentration, score_wallet_quality, score_trade_flow, market_title,
+                market_url, yes_token_id, current_yes_price, price_delta_6h, price_delta_24h,
+                price_delta_72h, severity, confidence, action_label, reason_summary, summary, reasons_json, sent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-04-07 20:00:00",
+                "cond-2",
+                "smart_money",
+                7.5,
+                7.5,
+                3.0,
+                1.5,
+                1.5,
+                1.5,
+                "Closed Fixture Market",
+                "https://polymarket.com/event/event-slug",
+                "yes-token-2",
+                0.61,
+                0.1,
+                0.16,
+                None,
+                "high",
+                "medium",
+                "Monitor",
+                "pre-resolution flow looked one-sided",
+                "Closed fixture summary",
+                '{"reasons":["pre-resolution flow looked one-sided"]}',
+                0,
+            ),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr("app.api_server.settings", settings)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/recommendations")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 2
+    assert payload["actionable"] == 1
+    assert payload["settled"] == 1
+    settled_item = next(item for item in payload["items"] if item["condition_id"] == "cond-2")
+    assert settled_item["status"] == "settled"
+    assert settled_item["outcome_verdict"] == "bad_call"
+    assert settled_item["final_yes_price"] == 0.0
 
 
 def test_api_system_action_runs_latent_backtest(tmp_path: Path, monkeypatch) -> None:

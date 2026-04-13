@@ -9,6 +9,7 @@ const navItems = [
   { href: "/markets", label: "Markets" },
   { href: "/watchlist", label: "Watchlist" },
   { href: "/alerts", label: "Alerts" },
+  { href: "/recommendations", label: "Recommendations" },
   { href: "/research", label: "Research" },
   { href: "/guide", label: "Guide" },
   { href: "/system", label: "System" },

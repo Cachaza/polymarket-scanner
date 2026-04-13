@@ -5,6 +5,7 @@ import {
   mockJobActionResponse,
   mockLatentBacktests,
   mockMarketDetail,
+  mockRecommendations,
   mockMarketTradeAftermath,
   mockMarkets,
   mockOverview,
@@ -32,6 +33,7 @@ export type Overview = typeof mockOverview;
 export type MarketsResponse = typeof mockMarkets;
 export type WatchlistResponse = typeof mockWatchlist;
 export type AlertsResponse = typeof mockAlerts;
+export type RecommendationsResponse = typeof mockRecommendations;
 export type MarketDetail = typeof mockMarketDetail;
 export type TimeSeriesResponse = typeof mockTimeSeries;
 export type HoldersResponse = typeof mockHolders;
@@ -47,6 +49,7 @@ type MockKey =
   | "markets"
   | "watchlist"
   | "alerts"
+  | "recommendations"
   | "marketDetail"
   | "timeseries"
   | "holders"
@@ -62,6 +65,7 @@ const mockMap: Record<MockKey, unknown> = {
   markets: mockMarkets,
   watchlist: mockWatchlist,
   alerts: mockAlerts,
+  recommendations: mockRecommendations,
   marketDetail: mockMarketDetail,
   timeseries: mockTimeSeries,
   holders: mockHolders,
@@ -139,6 +143,10 @@ export function getWatchlist(warmupOnly?: boolean) {
 
 export function getAlerts() {
   return fetchJson<AlertsResponse>("/api/v1/alerts", "alerts");
+}
+
+export function getRecommendations() {
+  return fetchJson<RecommendationsResponse>("/api/v1/recommendations", "recommendations");
 }
 
 export function getMarketDetail(conditionId: string) {

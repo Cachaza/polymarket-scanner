@@ -68,6 +68,33 @@ type AlertItem = {
   sent: boolean;
 };
 
+type RecommendationItem = {
+  condition_id: string;
+  market_title: string;
+  market_url: string;
+  source: string;
+  side: string;
+  recommendation: string;
+  status: string;
+  conviction_score: number;
+  severity: string | null;
+  confidence: string | null;
+  reason_summary: string;
+  entry_ts: string;
+  entry_yes_price: number;
+  latest_snapshot_ts: string | null;
+  current_yes_price: number;
+  current_return: number | null;
+  final_yes_price: number | null;
+  outcome_return: number | null;
+  outcome_verdict: string | null;
+  closed: boolean;
+  closed_time: string | null;
+  history_ready_6h: boolean;
+  warmup_only: boolean;
+  trade_enriched: boolean;
+};
+
 type AggregateBucket = {
   key: string;
   count: number;
@@ -256,6 +283,99 @@ export const mockWatchlist: { snapshot_ts: string; total: number; items: Watchli
 export const mockAlerts: { total: number; items: AlertItem[] } = {
   total: 0,
   items: [],
+};
+
+export const mockRecommendations: {
+  total: number;
+  actionable: number;
+  monitoring: number;
+  settled: number;
+  items: RecommendationItem[];
+} = {
+  total: 3,
+  actionable: 1,
+  monitoring: 1,
+  settled: 1,
+  items: [
+    {
+      condition_id: mockMarkets.items[0].condition_id,
+      market_title: mockMarkets.items[0].title,
+      market_url: mockMarkets.items[0].market_url,
+      source: "alert",
+      side: "Yes",
+      recommendation: "consider_yes",
+      status: "actionable",
+      conviction_score: 8.7,
+      severity: "high",
+      confidence: "medium",
+      reason_summary: "Strong wallets accumulated into a price break while recent flow stayed net-buy.",
+      entry_ts: "2026-04-09 13:43:08",
+      entry_yes_price: 0.71,
+      latest_snapshot_ts: "2026-04-10 01:10:00",
+      current_yes_price: 0.83,
+      current_return: 0.169,
+      final_yes_price: null,
+      outcome_return: null,
+      outcome_verdict: null,
+      closed: false,
+      closed_time: null,
+      history_ready_6h: true,
+      warmup_only: false,
+      trade_enriched: true,
+    },
+    {
+      condition_id: mockMarkets.items[1].condition_id,
+      market_title: mockMarkets.items[1].title,
+      market_url: mockMarkets.items[1].market_url,
+      source: "watchlist",
+      side: "Yes",
+      recommendation: "wait_for_history",
+      status: "monitoring",
+      conviction_score: 1.5,
+      severity: null,
+      confidence: null,
+      reason_summary: "Price anomaly is interesting, but the market is still in warm-up and does not have enough history.",
+      entry_ts: "2026-04-09 13:43:08",
+      entry_yes_price: 0.12,
+      latest_snapshot_ts: "2026-04-09 13:43:08",
+      current_yes_price: 0.12,
+      current_return: 0,
+      final_yes_price: null,
+      outcome_return: null,
+      outcome_verdict: null,
+      closed: false,
+      closed_time: null,
+      history_ready_6h: false,
+      warmup_only: true,
+      trade_enriched: false,
+    },
+    {
+      condition_id: "0xclosedfixture",
+      market_title: "Will candidate X win the nomination?",
+      market_url: "https://polymarket.com/event/mock-closed-market",
+      source: "alert",
+      side: "Yes",
+      recommendation: "consider_yes",
+      status: "settled",
+      conviction_score: 9.1,
+      severity: "high",
+      confidence: "high",
+      reason_summary: "Wallet quality and trade flow both aligned before resolution.",
+      entry_ts: "2026-04-05 09:15:00",
+      entry_yes_price: 0.63,
+      latest_snapshot_ts: "2026-04-07 18:00:00",
+      current_yes_price: 1,
+      current_return: 0.5873,
+      final_yes_price: 1,
+      outcome_return: 0.5873,
+      outcome_verdict: "good_call",
+      closed: true,
+      closed_time: "2026-04-07 18:00:00",
+      history_ready_6h: true,
+      warmup_only: false,
+      trade_enriched: true,
+    },
+  ],
 };
 
 export const mockMarketDetail = {

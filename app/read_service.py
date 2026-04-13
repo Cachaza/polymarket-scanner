@@ -23,6 +23,8 @@ from .api_models import (
     MarketsResponse,
     MarketSummary,
     OverviewResponse,
+    RecommendationItemResponse,
+    RecommendationsResponse,
     SystemResponse,
     TradeAftermathHorizon,
     TradeAftermathPoint,
@@ -132,6 +134,106 @@ def _round_minutes(value: float | None) -> float | None:
     if value is None:
         return None
     return round(value, 1)
+
+
+def _normalize_outcome_price(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"yes", "true", "winner_yes", "resolved_yes"}:
+            return 1.0
+        if lowered in {"no", "false", "winner_no", "resolved_no"}:
+            return 0.0
+        try:
+            parsed = float(lowered)
+        except ValueError:
+            if "yes" in lowered and "no" not in lowered:
+                return 1.0
+            if "no" in lowered and "yes" not in lowered:
+                return 0.0
+            return None
+        if 0.0 <= parsed <= 1.0:
+            return parsed
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        return parsed if 0.0 <= parsed <= 1.0 else None
+    if isinstance(value, list):
+        if value:
+            return _normalize_outcome_price(value[0])
+        return None
+    if isinstance(value, dict):
+        for key in ("yes", "Yes", "YES"):
+            if key in value:
+                return _normalize_outcome_price(value[key])
+    return None
+
+
+def _resolved_yes_price(raw_json: str | None, latest_yes_price: float | None) -> float | None:
+    payload = _json_loads(raw_json, {})
+    if isinstance(payload, dict):
+        for key in ("winningOutcome", "winner", "resolvedOutcome", "resolution", "outcome"):
+            candidate = _normalize_outcome_price(payload.get(key))
+            if candidate is not None:
+                return round(candidate, 4)
+
+        candidate = _normalize_outcome_price(payload.get("outcomePrices"))
+        if candidate is not None:
+            return round(candidate, 4)
+
+        tokens = payload.get("tokens") or payload.get("outcomes") or payload.get("outcomeTokens")
+        if isinstance(tokens, list):
+            for token in tokens:
+                if not isinstance(token, dict):
+                    continue
+                outcome_name = str(token.get("outcome") or token.get("name") or "").strip().lower()
+                if outcome_name != "yes":
+                    continue
+                for key in ("price", "outcomePrice", "winningPrice", "resolvedPrice"):
+                    candidate = _normalize_outcome_price(token.get(key))
+                    if candidate is not None:
+                        return round(candidate, 4)
+
+    if latest_yes_price is not None and (latest_yes_price <= 0.05 or latest_yes_price >= 0.95):
+        return round(latest_yes_price, 4)
+    return None
+
+
+def _recommendation_meta(row: Dict[str, Any]) -> tuple[str, str, float]:
+    score_total = float(row.get("score_total") or 0.0)
+    watchlist_strength = float(
+        int(bool(row.get("price_anomaly_hit")))
+        + int(bool(row.get("holder_concentration_hit")))
+        + int(bool(row.get("wallet_quality_hit")))
+        + int(bool(row.get("history_ready_6h")))
+        + int(bool(row.get("trade_enriched")))
+        - (0.5 if row.get("warmup_only") else 0.0)
+    )
+    conviction_score = round(score_total if row.get("alert_ts") else max(0.0, watchlist_strength), 2)
+
+    if row.get("alert_ts"):
+        if row.get("severity") == "high" or row.get("confidence") == "high" or score_total >= 8.0:
+            return "consider_yes", "actionable", conviction_score
+        return "watch_yes", "monitoring", conviction_score
+    if row.get("warmup_only"):
+        return "wait_for_history", "monitoring", conviction_score
+    if row.get("history_ready_6h") and (
+        row.get("trade_enriched") or row.get("wallet_quality_hit") or row.get("price_anomaly_hit")
+    ):
+        return "watch_yes", "monitoring", conviction_score
+    return "wait_for_history", "monitoring", conviction_score
+
+
+def _outcome_verdict(entry_price: float | None, final_price: float | None) -> tuple[float | None, str | None]:
+    outcome_return = _pct_change(entry_price, final_price)
+    if outcome_return is None:
+        return None, None
+    if outcome_return > 0:
+        return outcome_return, "good_call"
+    if outcome_return < 0:
+        return outcome_return, "bad_call"
+    return outcome_return, "flat_call"
 
 
 def _latest_watchlist_snapshot_ts(conn: PgConn) -> str | None:
@@ -627,6 +729,158 @@ def list_alerts(
             )
             for row in rows
         ],
+    )
+
+
+def list_recommendations(conn: PgConn, *, limit: int = 100) -> RecommendationsResponse:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            WITH latest_snapshot AS (
+                SELECT ms.*
+                FROM market_snapshots ms
+                JOIN (
+                    SELECT condition_id, MAX(snapshot_ts) AS snapshot_ts
+                    FROM market_snapshots
+                    GROUP BY condition_id
+                ) latest
+                  ON latest.condition_id = ms.condition_id
+                 AND latest.snapshot_ts = ms.snapshot_ts
+            ),
+            latest_watchlist_cycle AS (
+                SELECT MAX(snapshot_ts) AS snapshot_ts
+                FROM watchlist_candidates
+            ),
+            current_watchlist AS (
+                SELECT wc.*
+                FROM watchlist_candidates wc
+                JOIN latest_watchlist_cycle lw
+                  ON lw.snapshot_ts = wc.snapshot_ts
+            ),
+            latest_alert_key AS (
+                SELECT condition_id, MAX(alert_ts) AS alert_ts
+                FROM alerts
+                GROUP BY condition_id
+            ),
+            latest_alert AS (
+                SELECT a.*
+                FROM alerts a
+                JOIN latest_alert_key lk
+                  ON lk.condition_id = a.condition_id
+                 AND lk.alert_ts = a.alert_ts
+            ),
+            scoped AS (
+                SELECT
+                    m.condition_id,
+                    m.title AS market_title,
+                    COALESCE(
+                        m.market_url,
+                        CASE
+                            WHEN COALESCE(m.event_slug, m.slug) IS NOT NULL
+                            THEN 'https://polymarket.com/event/' || COALESCE(m.event_slug, m.slug)
+                        END
+                    ) AS market_url,
+                    m.closed,
+                    m.closed_time,
+                    m.raw_json,
+                    ls.snapshot_ts AS latest_snapshot_ts,
+                    ls.yes_price AS latest_yes_price,
+                    la.alert_ts,
+                    la.current_yes_price AS alert_entry_yes_price,
+                    la.score_total,
+                    la.severity,
+                    la.confidence,
+                    la.reason_summary AS alert_reason_summary,
+                    cw.snapshot_ts AS watchlist_snapshot_ts,
+                    cw.current_yes_price AS watchlist_entry_yes_price,
+                    cw.reason_summary AS watchlist_reason_summary,
+                    COALESCE(cw.price_anomaly_hit, 0) AS price_anomaly_hit,
+                    COALESCE(cw.holder_concentration_hit, 0) AS holder_concentration_hit,
+                    COALESCE(cw.wallet_quality_hit, 0) AS wallet_quality_hit,
+                    COALESCE(cw.history_ready_6h, 0) AS history_ready_6h,
+                    COALESCE(cw.warmup_only, 0) AS warmup_only,
+                    COALESCE(
+                        CASE
+                            WHEN EXISTS (SELECT 1 FROM trades t WHERE t.condition_id = m.condition_id) THEN 1
+                            ELSE cw.trade_enriched
+                        END,
+                        0
+                    ) AS trade_enriched
+                FROM markets m
+                LEFT JOIN latest_snapshot ls ON ls.condition_id = m.condition_id
+                LEFT JOIN latest_alert la ON la.condition_id = m.condition_id
+                LEFT JOIN current_watchlist cw ON cw.condition_id = m.condition_id
+                WHERE la.condition_id IS NOT NULL OR cw.condition_id IS NOT NULL
+            )
+            SELECT *
+            FROM scoped
+            ORDER BY COALESCE(alert_ts, watchlist_snapshot_ts) DESC, market_title ASC
+            LIMIT %(limit)s
+            """,
+            {"limit": limit},
+        )
+        rows = cur.fetchall()
+
+    items: List[RecommendationItemResponse] = []
+    for row in rows:
+        source = "alert" if row["alert_ts"] else "watchlist"
+        entry_ts = row["alert_ts"] or row["watchlist_snapshot_ts"]
+        entry_yes_price = row["alert_entry_yes_price"] if row["alert_ts"] else row["watchlist_entry_yes_price"]
+        recommendation, status, conviction_score = _recommendation_meta(row)
+        current_yes_price = row["latest_yes_price"] if row["latest_yes_price"] is not None else entry_yes_price
+        current_return = _pct_change(entry_yes_price, current_yes_price)
+        final_yes_price = _resolved_yes_price(row["raw_json"], row["latest_yes_price"]) if row["closed"] else None
+        outcome_return, outcome_verdict = _outcome_verdict(entry_yes_price, final_yes_price)
+        if row["closed"]:
+            status = "settled"
+
+        items.append(
+            RecommendationItemResponse(
+                condition_id=row["condition_id"],
+                market_title=row["market_title"],
+                market_url=row["market_url"],
+                source=source,
+                side="Yes",
+                recommendation=recommendation,
+                status=status,
+                conviction_score=conviction_score,
+                severity=row["severity"],
+                confidence=row["confidence"],
+                reason_summary=row["alert_reason_summary"] or row["watchlist_reason_summary"],
+                entry_ts=entry_ts,
+                entry_yes_price=entry_yes_price,
+                latest_snapshot_ts=row["latest_snapshot_ts"],
+                current_yes_price=current_yes_price,
+                current_return=current_return,
+                final_yes_price=final_yes_price,
+                outcome_return=outcome_return,
+                outcome_verdict=outcome_verdict,
+                closed=bool(row["closed"]),
+                closed_time=row["closed_time"],
+                history_ready_6h=bool(row["history_ready_6h"]),
+                warmup_only=bool(row["warmup_only"]),
+                trade_enriched=bool(row["trade_enriched"]),
+            )
+        )
+
+    status_order = {"actionable": 0, "monitoring": 1, "settled": 2}
+    items.sort(
+        key=lambda item: (
+            status_order.get(item.status, 99),
+            -item.conviction_score,
+            item.entry_ts,
+        )
+    )
+
+    actionable = sum(1 for item in items if item.status == "actionable")
+    monitoring = sum(1 for item in items if item.status == "monitoring")
+    settled = sum(1 for item in items if item.status == "settled")
+    return RecommendationsResponse(
+        total=len(items),
+        actionable=actionable,
+        monitoring=monitoring,
+        settled=settled,
+        items=items,
     )
 
 

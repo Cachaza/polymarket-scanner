@@ -110,6 +110,41 @@ class AlertsResponse(BaseModel):
     items: List[AlertResponse]
 
 
+class RecommendationItemResponse(BaseModel):
+    condition_id: str
+    market_title: str | None
+    market_url: str | None
+    source: str
+    side: str
+    recommendation: str
+    status: str
+    conviction_score: float
+    severity: str | None
+    confidence: str | None
+    reason_summary: str | None
+    entry_ts: str
+    entry_yes_price: float | None
+    latest_snapshot_ts: str | None
+    current_yes_price: float | None
+    current_return: float | None
+    final_yes_price: float | None
+    outcome_return: float | None
+    outcome_verdict: str | None
+    closed: bool
+    closed_time: str | None
+    history_ready_6h: bool
+    warmup_only: bool
+    trade_enriched: bool
+
+
+class RecommendationsResponse(BaseModel):
+    total: int
+    actionable: int
+    monitoring: int
+    settled: int
+    items: List[RecommendationItemResponse]
+
+
 class MarketDetailResponse(BaseModel):
     condition_id: str
     title: str

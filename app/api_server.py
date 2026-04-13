@@ -19,6 +19,7 @@ from .api_models import (
     MarketDetailResponse,
     MarketsResponse,
     OverviewResponse,
+    RecommendationsResponse,
     SystemResponse,
     TradeAftermathResponse,
     TimeSeriesResponse,
@@ -40,6 +41,7 @@ from .read_service import (
     get_market_timeseries,
     get_market_trades,
     get_overview,
+    list_recommendations,
     get_system,
     get_watchlist,
     list_alerts,
@@ -218,6 +220,12 @@ def alerts(
             limit=limit,
             offset=offset,
         )
+
+
+@app.get("/api/v1/recommendations", response_model=RecommendationsResponse)
+def recommendations(limit: int = Query(default=100, ge=1, le=250)) -> RecommendationsResponse:
+    with read_connection(settings.database_url) as conn:
+        return list_recommendations(conn, limit=limit)
 
 
 @app.get("/api/v1/markets/{condition_id}", response_model=MarketDetailResponse)

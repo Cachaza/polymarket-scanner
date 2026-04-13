@@ -17,7 +17,7 @@ export default async function AlertsPage() {
         <SectionHeader
           eyebrow="Alerts"
           title="Alert feed and component breakdowns"
-          description="Review scored alerts, inspect severity and confidence, and see the component breakdown that produced each signal."
+          description="Review raw scored alerts here, then use the recommendations page as the actual action layer for deciding whether to consider a YES entry, wait, or review settled outcomes."
         />
         <Card>
           <CardHeader>
