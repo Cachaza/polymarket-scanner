@@ -11,7 +11,14 @@ def normalize_outcome_price(value: Any) -> float | None:
     if value is None:
         return None
     if isinstance(value, str):
-        lowered = value.strip().lower()
+        stripped = value.strip()
+        if stripped.startswith(("[", "{")):
+            try:
+                return normalize_outcome_price(json.loads(stripped))
+            except Exception:
+                pass
+
+        lowered = stripped.lower()
         if lowered in {"yes", "true", "winner_yes", "resolved_yes"}:
             return 1.0
         if lowered in {"no", "false", "winner_no", "resolved_no"}:

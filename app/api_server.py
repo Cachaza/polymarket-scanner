@@ -223,7 +223,7 @@ def alerts(
 
 
 @app.get("/api/v1/recommendations", response_model=RecommendationsResponse)
-def recommendations(limit: int = Query(default=100, ge=1, le=250)) -> RecommendationsResponse:
+def recommendations(limit: int = Query(default=250, ge=1, le=250)) -> RecommendationsResponse:
     with read_connection(settings.database_url) as conn:
         return list_recommendations(conn, limit=limit)
 

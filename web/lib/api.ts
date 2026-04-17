@@ -146,7 +146,7 @@ export function getAlerts() {
 }
 
 export function getRecommendations() {
-  return fetchJson<RecommendationsResponse>("/api/v1/recommendations", "recommendations");
+  return fetchJson<RecommendationsResponse>("/api/v1/recommendations?limit=250", "recommendations");
 }
 
 export function getMarketDetail(conditionId: string) {

@@ -90,41 +90,55 @@ def market_text_blob(event: Dict[str, Any], market: Dict[str, Any]) -> str:
     )
 
 
+def _first_market_event(market: Dict[str, Any]) -> Dict[str, Any]:
+    for event in _as_list(market.get("events")):
+        if isinstance(event, dict):
+            return event
+    return {}
+
+
+def market_to_market_record(market: Dict[str, Any], event: Dict[str, Any] | None = None) -> MarketRecord | None:
+    event = event or _first_market_event(market)
+    condition_id = extract_condition_id(market)
+    if not condition_id:
+        return None
+
+    yes_token_id, no_token_id = extract_yes_no_token_ids(market)
+    event_slug = event.get("slug") or market.get("eventSlug") or market.get("event_slug")
+    return MarketRecord(
+        condition_id=str(condition_id),
+        event_id=str(event.get("id")) if event.get("id") is not None else None,
+        event_slug=event_slug,
+        slug=market.get("slug"),
+        market_id=str(market.get("id")) if market.get("id") is not None else None,
+        question_id=str(market.get("questionID")) if market.get("questionID") is not None else None,
+        market_url=build_market_url(event_slug, market.get("slug")),
+        title=str(market.get("question") or market.get("title") or market.get("marketTitle") or "Untitled market"),
+        description=market.get("description") or event.get("description"),
+        category=market.get("category") or event.get("category"),
+        active=bool(market.get("active", event.get("active", True))),
+        closed=bool(market.get("closed", event.get("closed", False))),
+        archived=bool(market.get("archived", event.get("archived", False))),
+        accepting_orders=bool(market["acceptingOrders"]) if "acceptingOrders" in market else None,
+        end_date=extract_end_date(event, market),
+        closed_time=market.get("closedTime"),
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
+        image_url=market.get("image") or market.get("icon") or event.get("image") or event.get("icon"),
+        reward_asset_address=extract_reward_asset_address(market),
+        raw_json=safe_json_dumps(market),
+    )
+
+
 def event_to_market_records(event: Dict[str, Any], keywords: Iterable[str]) -> List[MarketRecord]:
     out: List[MarketRecord] = []
     for market in event.get("markets", []) or []:
-        condition_id = extract_condition_id(market)
-        if not condition_id:
-            continue
         blob = market_text_blob(event, market)
         if not matches_keywords(blob, keywords):
             continue
-        yes_token_id, no_token_id = extract_yes_no_token_ids(market)
-        out.append(
-            MarketRecord(
-                condition_id=str(condition_id),
-                event_id=str(event.get("id")) if event.get("id") is not None else None,
-                event_slug=event.get("slug"),
-                slug=market.get("slug"),
-                market_id=str(market.get("id")) if market.get("id") is not None else None,
-                question_id=str(market.get("questionID")) if market.get("questionID") is not None else None,
-                market_url=build_market_url(event.get("slug"), market.get("slug")),
-                title=str(market.get("question") or market.get("title") or market.get("marketTitle") or "Untitled market"),
-                description=market.get("description") or event.get("description"),
-                category=market.get("category") or event.get("category"),
-                active=bool(market.get("active", event.get("active", True))),
-                closed=bool(market.get("closed", event.get("closed", False))),
-                archived=bool(market.get("archived", event.get("archived", False))),
-                accepting_orders=bool(market["acceptingOrders"]) if "acceptingOrders" in market else None,
-                end_date=extract_end_date(event, market),
-                closed_time=market.get("closedTime"),
-                yes_token_id=yes_token_id,
-                no_token_id=no_token_id,
-                image_url=market.get("image") or market.get("icon") or event.get("image") or event.get("icon"),
-                reward_asset_address=extract_reward_asset_address(market),
-                raw_json=safe_json_dumps(market),
-            )
-        )
+        record = market_to_market_record(market, event)
+        if record is not None:
+            out.append(record)
     return out
 
 

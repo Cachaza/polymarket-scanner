@@ -217,25 +217,25 @@ class Database:
                     reward_asset_address, discovered_at, last_seen_at, raw_json
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(condition_id) DO UPDATE SET
-                    event_id=EXCLUDED.event_id,
-                    event_slug=EXCLUDED.event_slug,
-                    slug=EXCLUDED.slug,
-                    market_id=EXCLUDED.market_id,
-                    question_id=EXCLUDED.question_id,
-                    market_url=EXCLUDED.market_url,
+                    event_id=COALESCE(EXCLUDED.event_id, markets.event_id),
+                    event_slug=COALESCE(EXCLUDED.event_slug, markets.event_slug),
+                    slug=COALESCE(EXCLUDED.slug, markets.slug),
+                    market_id=COALESCE(EXCLUDED.market_id, markets.market_id),
+                    question_id=COALESCE(EXCLUDED.question_id, markets.question_id),
+                    market_url=COALESCE(EXCLUDED.market_url, markets.market_url),
                     title=EXCLUDED.title,
-                    description=EXCLUDED.description,
-                    category=EXCLUDED.category,
+                    description=COALESCE(EXCLUDED.description, markets.description),
+                    category=COALESCE(EXCLUDED.category, markets.category),
                     active=EXCLUDED.active,
                     closed=EXCLUDED.closed,
                     archived=EXCLUDED.archived,
-                    accepting_orders=EXCLUDED.accepting_orders,
-                    end_date=EXCLUDED.end_date,
-                    closed_time=EXCLUDED.closed_time,
-                    yes_token_id=EXCLUDED.yes_token_id,
-                    no_token_id=EXCLUDED.no_token_id,
-                    image_url=EXCLUDED.image_url,
-                    reward_asset_address=EXCLUDED.reward_asset_address,
+                    accepting_orders=COALESCE(EXCLUDED.accepting_orders, markets.accepting_orders),
+                    end_date=COALESCE(EXCLUDED.end_date, markets.end_date),
+                    closed_time=COALESCE(EXCLUDED.closed_time, markets.closed_time),
+                    yes_token_id=COALESCE(EXCLUDED.yes_token_id, markets.yes_token_id),
+                    no_token_id=COALESCE(EXCLUDED.no_token_id, markets.no_token_id),
+                    image_url=COALESCE(EXCLUDED.image_url, markets.image_url),
+                    reward_asset_address=COALESCE(EXCLUDED.reward_asset_address, markets.reward_asset_address),
                     last_seen_at=EXCLUDED.last_seen_at,
                     raw_json=EXCLUDED.raw_json
                 """,
@@ -285,6 +285,25 @@ class Database:
                 (limit,),
             )
             return list(cur.fetchall())
+
+    def get_unclosed_recommended_condition_ids(self, limit: int = 250) -> List[str]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT m.condition_id
+                FROM markets m
+                WHERE COALESCE(m.closed, 0) = 0
+                  AND (
+                    EXISTS (SELECT 1 FROM recommendations r WHERE r.condition_id = m.condition_id)
+                    OR EXISTS (SELECT 1 FROM alerts a WHERE a.condition_id = m.condition_id)
+                    OR EXISTS (SELECT 1 FROM watchlist_candidates wc WHERE wc.condition_id = m.condition_id)
+                  )
+                ORDER BY m.condition_id
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [row["condition_id"] for row in cur.fetchall()]
 
     def get_market_count(self) -> int:
         with self.conn.cursor() as cur:

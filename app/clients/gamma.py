@@ -12,6 +12,14 @@ class GammaClient(BaseHTTPClient):
     def list_events(self, **params: Any) -> List[Dict[str, Any]]:
         return self.get("/events", params=params)
 
+    def list_markets(self, **params: Any) -> List[Dict[str, Any]]:
+        return self.get("/markets", params=params)
+
+    def get_markets_by_condition_ids(self, condition_ids: List[str]) -> List[Dict[str, Any]]:
+        if not condition_ids:
+            return []
+        return self.list_markets(condition_ids=condition_ids, limit=len(condition_ids), offset=0)
+
     def iter_active_events(self, limit: int = 100, order: str = "volume24hr") -> Iterator[Dict[str, Any]]:
         offset = 0
         while True:
