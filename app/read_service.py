@@ -767,11 +767,25 @@ def _list_recommendations_derived(conn: PgConn, *, limit: int = 100) -> Recommen
                 LEFT JOIN latest_alert la ON la.condition_id = m.condition_id
                 LEFT JOIN current_watchlist cw ON cw.condition_id = m.condition_id
                 WHERE la.condition_id IS NOT NULL OR cw.condition_id IS NOT NULL
+            ),
+            ranked_results AS (
+                SELECT
+                    scoped.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(closed, 0)
+                        ORDER BY
+                            CASE
+                                WHEN COALESCE(closed, 0) = 1 THEN COALESCE(closed_time, alert_ts, watchlist_snapshot_ts)
+                                ELSE COALESCE(alert_ts, watchlist_snapshot_ts)
+                            END DESC,
+                            market_title ASC
+                    ) AS result_rn
+                FROM scoped
             )
             SELECT *
-            FROM scoped
-            ORDER BY COALESCE(alert_ts, watchlist_snapshot_ts) DESC, market_title ASC
-            LIMIT %(limit)s
+            FROM ranked_results
+            WHERE result_rn <= %(limit)s
+            ORDER BY COALESCE(closed, 0), result_rn
             """,
             {"limit": limit},
         )
@@ -846,34 +860,52 @@ def list_recommendations(conn: PgConn, *, limit: int = 100) -> RecommendationsRe
                 ) latest
                   ON latest.condition_id = ms.condition_id
                  AND latest.snapshot_ts = ms.snapshot_ts
+            ),
+            enriched_recommendations AS (
+                SELECT
+                    lr.entry_ts,
+                    lr.condition_id,
+                    lr.source,
+                    lr.market_title,
+                    lr.market_url,
+                    lr.side,
+                    lr.recommendation,
+                    lr.status,
+                    lr.conviction_score,
+                    lr.severity,
+                    lr.confidence,
+                    lr.reason_summary,
+                    lr.entry_yes_price,
+                    lr.history_ready_6h,
+                    lr.warmup_only,
+                    lr.trade_enriched,
+                    m.closed,
+                    m.closed_time,
+                    m.raw_json,
+                    ls.snapshot_ts AS latest_snapshot_ts,
+                    ls.yes_price AS latest_yes_price
+                FROM latest_recommendation lr
+                JOIN markets m ON m.condition_id = lr.condition_id
+                LEFT JOIN latest_snapshot ls ON ls.condition_id = lr.condition_id
+            ),
+            ranked_results AS (
+                SELECT
+                    enriched_recommendations.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(closed, 0)
+                        ORDER BY
+                            CASE
+                                WHEN COALESCE(closed, 0) = 1 THEN COALESCE(closed_time, entry_ts)
+                                ELSE entry_ts
+                            END DESC,
+                            market_title ASC
+                    ) AS result_rn
+                FROM enriched_recommendations
             )
-            SELECT
-                lr.entry_ts,
-                lr.condition_id,
-                lr.source,
-                lr.market_title,
-                lr.market_url,
-                lr.side,
-                lr.recommendation,
-                lr.status,
-                lr.conviction_score,
-                lr.severity,
-                lr.confidence,
-                lr.reason_summary,
-                lr.entry_yes_price,
-                lr.history_ready_6h,
-                lr.warmup_only,
-                lr.trade_enriched,
-                m.closed,
-                m.closed_time,
-                m.raw_json,
-                ls.snapshot_ts AS latest_snapshot_ts,
-                ls.yes_price AS latest_yes_price
-            FROM latest_recommendation lr
-            JOIN markets m ON m.condition_id = lr.condition_id
-            LEFT JOIN latest_snapshot ls ON ls.condition_id = lr.condition_id
-            ORDER BY lr.entry_ts DESC, lr.market_title ASC
-            LIMIT %(limit)s
+            SELECT *
+            FROM ranked_results
+            WHERE result_rn <= %(limit)s
+            ORDER BY COALESCE(closed, 0), result_rn
             """,
             {"limit": limit},
         )
