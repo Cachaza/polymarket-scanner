@@ -11,7 +11,9 @@ import { fmtDateTime, fmtNumber, fmtSignedPercent } from "@/lib/utils";
 
 function recommendationTone(value: string) {
   if (value === "consider_yes") return "border-good/30 bg-good/10 text-good";
+  if (value === "consider_no") return "border-good/30 bg-good/10 text-good";
   if (value === "watch_yes") return "border-accent/30 bg-accent/10 text-accent";
+  if (value === "watch_no") return "border-accent/30 bg-accent/10 text-accent";
   return "border-warn/30 bg-warn/10 text-warn";
 }
 
@@ -23,7 +25,9 @@ function verdictTone(value: string | null) {
 
 function recommendationLabel(value: string) {
   if (value === "consider_yes") return "Consider YES";
+  if (value === "consider_no") return "Consider NO";
   if (value === "watch_yes") return "Watch YES";
+  if (value === "watch_no") return "Watch NO";
   return "Wait for history";
 }
 
@@ -45,11 +49,11 @@ export default async function RecommendationsPage() {
         <SectionHeader
           eyebrow="Recommendations"
           title="Decision queue with feedback"
-          description="Use alerts as raw telemetry and this page as the action layer. Open items tell you whether to consider a YES entry or wait, and settled items tell you whether that thesis ended up being right."
+          description="Use alerts as raw telemetry and this page as the action layer. Open items tell you whether to consider an entry or wait, and settled items track whether the thesis ended up being right."
         />
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <StatCard label="Total ideas" value={recommendations.total} hint="Latest alert or watchlist thesis per market" />
-          <StatCard label="Actionable" value={recommendations.actionable} hint="Strong enough to consider a YES entry now" />
+          <StatCard label="Actionable" value={recommendations.actionable} hint="Strong enough to consider an entry now" />
           <StatCard label="Monitoring" value={recommendations.monitoring} hint="Interesting, but not ready to act yet" />
           <StatCard label="Settled" value={recommendations.settled} hint="Closed markets with feedback on the call" />
         </div>
@@ -86,11 +90,11 @@ export default async function RecommendationsPage() {
                           <div className="text-xs uppercase tracking-[0.14em] text-muted">Score</div>
                         </div>
                         <div className="rounded-xl bg-slate-50 px-3 py-2">
-                          <div className="font-mono text-lg">{fmtNumber(item.entry_yes_price, 3)}</div>
+                          <div className="font-mono text-lg">{fmtNumber(item.entry_price, 3)}</div>
                           <div className="text-xs uppercase tracking-[0.14em] text-muted">Entry</div>
                         </div>
                         <div className="rounded-xl bg-slate-50 px-3 py-2">
-                          <div className="font-mono text-lg">{fmtNumber(item.current_yes_price, 3)}</div>
+                          <div className="font-mono text-lg">{fmtNumber(item.current_price, 3)}</div>
                           <div className="text-xs uppercase tracking-[0.14em] text-muted">Now</div>
                         </div>
                         <div className="rounded-xl bg-slate-50 px-3 py-2">
@@ -114,7 +118,7 @@ export default async function RecommendationsPage() {
             </CardHeader>
             <CardContent className="space-y-3">
               {settledItems.length === 0 ? (
-                <EmptyState title="No settled ideas yet" description="Closed markets will move here so you can see whether the YES thesis was actually right or wrong." />
+                <EmptyState title="No settled ideas yet" description="Closed markets will move here so you can see whether the thesis was actually right or wrong." />
               ) : (
                 settledItems.map((item) => (
                   <div key={item.condition_id} className="rounded-2xl border border-line px-4 py-4">
@@ -134,11 +138,11 @@ export default async function RecommendationsPage() {
                     </div>
                     <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
                       <div className="rounded-xl bg-slate-50 px-3 py-2">
-                        <div className="font-mono text-lg">{fmtNumber(item.entry_yes_price, 3)}</div>
+                        <div className="font-mono text-lg">{fmtNumber(item.entry_price, 3)}</div>
                         <div className="text-xs uppercase tracking-[0.14em] text-muted">Entry</div>
                       </div>
                       <div className="rounded-xl bg-slate-50 px-3 py-2">
-                        <div className="font-mono text-lg">{fmtNumber(item.final_yes_price, 3)}</div>
+                        <div className="font-mono text-lg">{fmtNumber(item.final_price, 3)}</div>
                         <div className="text-xs uppercase tracking-[0.14em] text-muted">Final</div>
                       </div>
                       <div className="rounded-xl bg-slate-50 px-3 py-2">

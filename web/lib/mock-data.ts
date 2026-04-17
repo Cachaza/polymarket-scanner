@@ -81,10 +81,13 @@ type RecommendationItem = {
   confidence: string | null;
   reason_summary: string;
   entry_ts: string;
+  entry_price: number;
   entry_yes_price: number;
   latest_snapshot_ts: string | null;
+  current_price: number;
   current_yes_price: number;
   current_return: number | null;
+  final_price: number | null;
   final_yes_price: number | null;
   outcome_return: number | null;
   outcome_verdict: string | null;
@@ -310,10 +313,13 @@ export const mockRecommendations: {
       confidence: "medium",
       reason_summary: "Strong wallets accumulated into a price break while recent flow stayed net-buy.",
       entry_ts: "2026-04-09 13:43:08",
+      entry_price: 0.71,
       entry_yes_price: 0.71,
       latest_snapshot_ts: "2026-04-10 01:10:00",
+      current_price: 0.83,
       current_yes_price: 0.83,
       current_return: 0.169,
+      final_price: null,
       final_yes_price: null,
       outcome_return: null,
       outcome_verdict: null,
@@ -336,10 +342,13 @@ export const mockRecommendations: {
       confidence: null,
       reason_summary: "Price anomaly is interesting, but the market is still in warm-up and does not have enough history.",
       entry_ts: "2026-04-09 13:43:08",
+      entry_price: 0.12,
       entry_yes_price: 0.12,
       latest_snapshot_ts: "2026-04-09 13:43:08",
+      current_price: 0.12,
       current_yes_price: 0.12,
       current_return: 0,
+      final_price: null,
       final_yes_price: null,
       outcome_return: null,
       outcome_verdict: null,
@@ -362,10 +371,13 @@ export const mockRecommendations: {
       confidence: "high",
       reason_summary: "Wallet quality and trade flow both aligned before resolution.",
       entry_ts: "2026-04-05 09:15:00",
+      entry_price: 0.63,
       entry_yes_price: 0.63,
       latest_snapshot_ts: "2026-04-07 18:00:00",
+      current_price: 1,
       current_yes_price: 1,
       current_return: 0.5873,
+      final_price: 1,
       final_yes_price: 1,
       outcome_return: 0.5873,
       outcome_verdict: "good_call",

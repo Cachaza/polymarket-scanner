@@ -39,7 +39,7 @@ from .api_models import (
 )
 from .backtest import DEFAULT_BACKTEST_HORIZONS, DEFAULT_LATENT_BACKTEST_HORIZONS
 from .config import Settings
-from .recommendations import outcome_verdict, recommendation_meta, resolved_yes_price
+from .recommendations import normalize_recommendation_side, outcome_verdict, recommendation_meta, resolved_side_price, resolved_yes_price
 from .utils import build_market_url, utc_now_iso
 
 # Type alias for a psycopg connection used in read-only queries
@@ -636,10 +636,16 @@ def list_alerts(
 def _build_recommendation_response(rows: List[Dict[str, Any]]) -> RecommendationsResponse:
     items: List[RecommendationItemResponse] = []
     for row in rows:
+        side = normalize_recommendation_side(row["side"])
+        entry_price = row.get("entry_price") if row.get("entry_price") is not None else row["entry_yes_price"]
         current_yes_price = row["latest_yes_price"] if row["latest_yes_price"] is not None else row["entry_yes_price"]
+        latest_side_price = row.get("latest_no_price") if side == "No" else row.get("latest_yes_price")
+        current_price = latest_side_price if latest_side_price is not None else entry_price
         current_return = _pct_change(row["entry_yes_price"], current_yes_price)
+        side_current_return = _pct_change(entry_price, current_price)
         final_yes_price = resolved_yes_price(row["raw_json"], row["latest_yes_price"]) if row["closed"] else None
-        outcome_return, verdict = outcome_verdict(row["entry_yes_price"], final_yes_price)
+        final_price = resolved_side_price(row["raw_json"], row["latest_yes_price"], side) if row["closed"] else None
+        outcome_return, verdict = outcome_verdict(entry_price, final_price)
         status = "settled" if row["closed"] else row["status"]
 
         items.append(
@@ -648,7 +654,7 @@ def _build_recommendation_response(rows: List[Dict[str, Any]]) -> Recommendation
                 market_title=row["market_title"],
                 market_url=row["market_url"],
                 source=row["source"],
-                side=row["side"],
+                side=side,
                 recommendation=row["recommendation"],
                 status=status,
                 conviction_score=row["conviction_score"],
@@ -656,10 +662,13 @@ def _build_recommendation_response(rows: List[Dict[str, Any]]) -> Recommendation
                 confidence=row["confidence"],
                 reason_summary=row["reason_summary"],
                 entry_ts=row["entry_ts"],
+                entry_price=entry_price,
                 entry_yes_price=row["entry_yes_price"],
                 latest_snapshot_ts=row["latest_snapshot_ts"],
+                current_price=current_price,
                 current_yes_price=current_yes_price,
-                current_return=current_return,
+                current_return=side_current_return if side == "No" else current_return,
+                final_price=final_price,
                 final_yes_price=final_yes_price,
                 outcome_return=outcome_return,
                 outcome_verdict=verdict,
@@ -741,6 +750,7 @@ def _list_recommendations_derived(conn: PgConn, *, limit: int = 100) -> Recommen
                     m.raw_json,
                     ls.snapshot_ts AS latest_snapshot_ts,
                     ls.yes_price AS latest_yes_price,
+                    ls.no_price AS latest_no_price,
                     la.alert_ts,
                     la.current_yes_price AS alert_entry_yes_price,
                     la.score_total,
@@ -748,7 +758,9 @@ def _list_recommendations_derived(conn: PgConn, *, limit: int = 100) -> Recommen
                     la.confidence,
                     la.reason_summary AS alert_reason_summary,
                     cw.snapshot_ts AS watchlist_snapshot_ts,
+                    COALESCE(cw.side, 'Yes') AS watchlist_side,
                     cw.current_yes_price AS watchlist_entry_yes_price,
+                    cw.current_no_price AS watchlist_entry_no_price,
                     cw.reason_summary AS watchlist_reason_summary,
                     COALESCE(cw.price_anomaly_hit, 0) AS price_anomaly_hit,
                     COALESCE(cw.holder_concentration_hit, 0) AS holder_concentration_hit,
@@ -795,15 +807,21 @@ def _list_recommendations_derived(conn: PgConn, *, limit: int = 100) -> Recommen
     for row in rows:
         source = "alert" if row["alert_ts"] else "watchlist"
         entry_ts = row["alert_ts"] or row["watchlist_snapshot_ts"]
+        side = "Yes" if row["alert_ts"] else row["watchlist_side"]
         entry_yes_price = row["alert_entry_yes_price"] if row["alert_ts"] else row["watchlist_entry_yes_price"]
-        recommendation, status, conviction_score = recommendation_meta(row)
+        entry_price = (
+            entry_yes_price
+            if row["alert_ts"] or side != "No"
+            else row["watchlist_entry_no_price"]
+        )
+        recommendation, status, conviction_score = recommendation_meta({**row, "side": side})
         normalized_rows.append(
             {
                 "condition_id": row["condition_id"],
                 "market_title": row["market_title"],
                 "market_url": row["market_url"],
                 "source": source,
-                "side": "Yes",
+                "side": side,
                 "recommendation": recommendation,
                 "status": status,
                 "conviction_score": conviction_score,
@@ -811,9 +829,11 @@ def _list_recommendations_derived(conn: PgConn, *, limit: int = 100) -> Recommen
                 "confidence": row["confidence"],
                 "reason_summary": row["alert_reason_summary"] or row["watchlist_reason_summary"],
                 "entry_ts": entry_ts,
+                "entry_price": entry_price,
                 "entry_yes_price": entry_yes_price,
                 "latest_snapshot_ts": row["latest_snapshot_ts"],
                 "latest_yes_price": row["latest_yes_price"],
+                "latest_no_price": row["latest_no_price"],
                 "closed": row["closed"],
                 "closed_time": row["closed_time"],
                 "history_ready_6h": row["history_ready_6h"],
@@ -875,6 +895,7 @@ def list_recommendations(conn: PgConn, *, limit: int = 100) -> RecommendationsRe
                     lr.severity,
                     lr.confidence,
                     lr.reason_summary,
+                    lr.entry_price,
                     lr.entry_yes_price,
                     lr.history_ready_6h,
                     lr.warmup_only,
@@ -883,7 +904,8 @@ def list_recommendations(conn: PgConn, *, limit: int = 100) -> RecommendationsRe
                     m.closed_time,
                     m.raw_json,
                     ls.snapshot_ts AS latest_snapshot_ts,
-                    ls.yes_price AS latest_yes_price
+                    ls.yes_price AS latest_yes_price,
+                    ls.no_price AS latest_no_price
                 FROM latest_recommendation lr
                 JOIN markets m ON m.condition_id = lr.condition_id
                 LEFT JOIN latest_snapshot ls ON ls.condition_id = lr.condition_id

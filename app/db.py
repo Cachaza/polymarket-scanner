@@ -141,6 +141,7 @@ class Database:
             "severity": "TEXT",
             "confidence": "TEXT",
             "reason_summary": "TEXT",
+            "entry_price": "REAL",
             "entry_yes_price": "REAL",
             "history_ready_6h": "INTEGER NOT NULL DEFAULT 0",
             "warmup_only": "INTEGER NOT NULL DEFAULT 0",
@@ -159,6 +160,21 @@ class Database:
                 """,
                 (utc_now_iso(),),
             )
+            cur.execute(
+                """
+                UPDATE recommendations
+                SET entry_price = COALESCE(entry_price, entry_yes_price)
+                """
+            )
+
+        watchlist_columns = {
+            "side": "TEXT NOT NULL DEFAULT 'Yes'",
+            "current_no_price": "REAL",
+            "no_price_delta_6h": "REAL",
+            "no_top5_seen_share": "REAL",
+        }
+        for column_name, definition in watchlist_columns.items():
+            self._ensure_column("watchlist_candidates", column_name, definition)
 
         self._backfill_recommendations_if_empty()
 
@@ -745,9 +761,9 @@ class Database:
                 """
                 INSERT INTO recommendations (
                     entry_ts, condition_id, source, market_title, market_url, side, recommendation,
-                    status, conviction_score, severity, confidence, reason_summary, entry_yes_price,
+                    status, conviction_score, severity, confidence, reason_summary, entry_price, entry_yes_price,
                     history_ready_6h, warmup_only, trade_enriched, source_meta_json, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (condition_id, source, entry_ts) DO UPDATE SET
                     market_title=EXCLUDED.market_title,
                     market_url=EXCLUDED.market_url,
@@ -758,6 +774,7 @@ class Database:
                     severity=EXCLUDED.severity,
                     confidence=EXCLUDED.confidence,
                     reason_summary=EXCLUDED.reason_summary,
+                    entry_price=EXCLUDED.entry_price,
                     entry_yes_price=EXCLUDED.entry_yes_price,
                     history_ready_6h=EXCLUDED.history_ready_6h,
                     warmup_only=EXCLUDED.warmup_only,
@@ -777,6 +794,7 @@ class Database:
                     row.get("severity"),
                     row.get("confidence"),
                     row.get("reason_summary"),
+                    row.get("entry_price", row.get("entry_yes_price")),
                     row.get("entry_yes_price"),
                     int(bool(row.get("history_ready_6h"))),
                     int(bool(row.get("warmup_only"))),
@@ -791,16 +809,21 @@ class Database:
             cur.execute(
                 """
                 INSERT INTO watchlist_candidates (
-                    snapshot_ts, condition_id, market_title, current_yes_price, price_delta_6h,
-                    yes_top5_seen_share, price_anomaly_hit, holder_concentration_hit,
+                    snapshot_ts, condition_id, market_title, side, current_yes_price, current_no_price,
+                    price_delta_6h, no_price_delta_6h, yes_top5_seen_share, no_top5_seen_share,
+                    price_anomaly_hit, holder_concentration_hit,
                     wallet_quality_hit, warmup_only, history_ready_6h, trade_enriched,
                     reason_summary, component_flags_json
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (condition_id, snapshot_ts) DO UPDATE SET
                     market_title=EXCLUDED.market_title,
+                    side=EXCLUDED.side,
                     current_yes_price=EXCLUDED.current_yes_price,
+                    current_no_price=EXCLUDED.current_no_price,
                     price_delta_6h=EXCLUDED.price_delta_6h,
+                    no_price_delta_6h=EXCLUDED.no_price_delta_6h,
                     yes_top5_seen_share=EXCLUDED.yes_top5_seen_share,
+                    no_top5_seen_share=EXCLUDED.no_top5_seen_share,
                     price_anomaly_hit=EXCLUDED.price_anomaly_hit,
                     holder_concentration_hit=EXCLUDED.holder_concentration_hit,
                     wallet_quality_hit=EXCLUDED.wallet_quality_hit,
@@ -814,9 +837,13 @@ class Database:
                     row["snapshot_ts"],
                     row["condition_id"],
                     row.get("market_title"),
+                    row.get("side", "Yes"),
                     row.get("current_yes_price"),
+                    row.get("current_no_price"),
                     row.get("price_delta_6h"),
+                    row.get("no_price_delta_6h"),
                     row.get("yes_top5_seen_share"),
+                    row.get("no_top5_seen_share"),
                     int(bool(row.get("price_anomaly_hit"))),
                     int(bool(row.get("holder_concentration_hit"))),
                     int(bool(row.get("wallet_quality_hit"))),

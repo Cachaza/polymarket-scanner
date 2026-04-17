@@ -123,10 +123,13 @@ class RecommendationItemResponse(BaseModel):
     confidence: str | None
     reason_summary: str | None
     entry_ts: str
+    entry_price: float | None
     entry_yes_price: float | None
     latest_snapshot_ts: str | None
+    current_price: float | None
     current_yes_price: float | None
     current_return: float | None
+    final_price: float | None
     final_yes_price: float | None
     outcome_return: float | None
     outcome_verdict: str | None

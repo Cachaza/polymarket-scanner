@@ -70,28 +70,50 @@ def _observed_wallet_count(*holder_lists: List[Dict[str, Any]]) -> int:
     return len(wallets)
 
 
-def _passes_price_anomaly(latest_snapshot: Dict[str, Any], prev_snapshot: Dict[str, Any] | None) -> bool:
+def _price_delta(latest_snapshot: Dict[str, Any], prev_snapshot: Dict[str, Any] | None, key: str) -> float | None:
     if not prev_snapshot:
-        return False
-    old_yes = prev_snapshot["yes_price"]
-    new_yes = latest_snapshot.get("yes_price")
-    return (
-        old_yes is not None
-        and new_yes is not None
-        and abs(new_yes - old_yes) >= PRICE_ANOMALY_THRESHOLD
-    )
+        return None
+    old_price = prev_snapshot[key]
+    new_price = latest_snapshot.get(key)
+    if old_price is None or new_price is None:
+        return None
+    return new_price - old_price
 
 
-def _passes_holder_concentration(latest_snapshot: Dict[str, Any], prev_snapshot: Dict[str, Any] | None) -> bool:
+def _price_anomaly_side(yes_delta: float | None, no_delta: float | None) -> str | None:
+    candidates = []
+    if yes_delta is not None and abs(yes_delta) >= PRICE_ANOMALY_THRESHOLD:
+        candidates.append(("Yes" if yes_delta > 0 else "No", abs(yes_delta)))
+    if no_delta is not None and abs(no_delta) >= PRICE_ANOMALY_THRESHOLD:
+        candidates.append(("No" if no_delta > 0 else "Yes", abs(no_delta)))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[1])[0]
+
+
+def _holder_concentration_delta(
+    latest_snapshot: Dict[str, Any],
+    prev_snapshot: Dict[str, Any] | None,
+    key: str,
+) -> float | None:
     if not prev_snapshot:
-        return False
-    old_top = prev_snapshot["yes_top5_seen_share"]
-    new_top = latest_snapshot.get("yes_top5_seen_share")
-    return (
-        old_top is not None
-        and new_top is not None
-        and new_top - old_top >= HOLDER_CONCENTRATION_THRESHOLD
-    )
+        return None
+    old_top = prev_snapshot[key]
+    new_top = latest_snapshot.get(key)
+    if old_top is None or new_top is None:
+        return None
+    return new_top - old_top
+
+
+def _holder_concentration_side(yes_delta: float | None, no_delta: float | None) -> str | None:
+    candidates = []
+    if yes_delta is not None and yes_delta >= HOLDER_CONCENTRATION_THRESHOLD:
+        candidates.append(("Yes", yes_delta))
+    if no_delta is not None and no_delta >= HOLDER_CONCENTRATION_THRESHOLD:
+        candidates.append(("No", no_delta))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[1])[0]
 
 
 def _holder_wallet_addresses(*holder_lists: List[Dict[str, Any]]) -> List[str]:
@@ -118,12 +140,34 @@ def _passes_wallet_quality(wallet_addresses: Iterable[str], wallet_scores: Dict[
     return False
 
 
+def _choose_watchlist_side(
+    *,
+    price_side: str | None,
+    holder_side: str | None,
+    yes_wallet_quality_hit: bool,
+    no_wallet_quality_hit: bool,
+) -> str:
+    side_scores = {"Yes": 0, "No": 0}
+    if price_side:
+        side_scores[price_side] += 1
+    if holder_side:
+        side_scores[holder_side] += 2
+    if yes_wallet_quality_hit:
+        side_scores["Yes"] += 2
+    if no_wallet_quality_hit:
+        side_scores["No"] += 2
+    if side_scores["No"] > side_scores["Yes"]:
+        return "No"
+    return "Yes"
+
+
 def _has_local_history(prev_snapshot: Dict[str, Any] | None) -> bool:
     return prev_snapshot is not None
 
 
 def _watchlist_reason_summary(
     *,
+    side: str,
     price_anomaly_hit: bool,
     holder_concentration_hit: bool,
     wallet_quality_hit: bool,
@@ -139,7 +183,7 @@ def _watchlist_reason_summary(
     if not reasons:
         return "watchlist candidate"
     suffix = "history-ready" if history_ready_6h else "warm-up"
-    return f"{', '.join(reasons)} ({suffix})"
+    return f"{side}: {', '.join(reasons)} ({suffix})"
 
 
 def _normalize_trade_rows(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -285,11 +329,24 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
             }
             db.insert_market_snapshot(snapshot)
             prev_snapshot = db.get_snapshot_before(market["condition_id"], snapshot_ts, 6)
-            price_anomaly_pass = _passes_price_anomaly(snapshot, prev_snapshot)
-            holder_concentration_pass = _passes_holder_concentration(snapshot, prev_snapshot)
-            wallet_quality_pass = _passes_wallet_quality(
-                holder_wallets_by_condition.get(market["condition_id"], []),
-                wallet_scores,
+            yes_price_delta = _price_delta(snapshot, prev_snapshot, "yes_price")
+            no_price_delta = _price_delta(snapshot, prev_snapshot, "no_price")
+            price_side = _price_anomaly_side(yes_price_delta, no_price_delta)
+            price_anomaly_pass = price_side is not None
+
+            yes_top5_delta = _holder_concentration_delta(snapshot, prev_snapshot, "yes_top5_seen_share")
+            no_top5_delta = _holder_concentration_delta(snapshot, prev_snapshot, "no_top5_seen_share")
+            holder_side = _holder_concentration_side(yes_top5_delta, no_top5_delta)
+            holder_concentration_pass = holder_side is not None
+
+            yes_wallet_quality_pass = _passes_wallet_quality(_holder_wallet_addresses(holder_info["yes"]), wallet_scores)
+            no_wallet_quality_pass = _passes_wallet_quality(_holder_wallet_addresses(holder_info["no"]), wallet_scores)
+            wallet_quality_pass = yes_wallet_quality_pass or no_wallet_quality_pass
+            recommendation_side = _choose_watchlist_side(
+                price_side=price_side,
+                holder_side=holder_side,
+                yes_wallet_quality_hit=yes_wallet_quality_pass,
+                no_wallet_quality_hit=no_wallet_quality_pass,
             )
 
             if price_anomaly_pass:
@@ -311,15 +368,13 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
                     "condition_id": market["condition_id"],
                     "market_title": market["title"],
                     "market_url": market.get("market_url"),
+                    "side": recommendation_side,
                     "current_yes_price": snapshot.get("yes_price"),
-                    "price_delta_6h": (
-                        snapshot["yes_price"] - prev_snapshot["yes_price"]
-                        if prev_snapshot
-                        and prev_snapshot["yes_price"] is not None
-                        and snapshot["yes_price"] is not None
-                        else None
-                    ),
+                    "current_no_price": snapshot.get("no_price"),
+                    "price_delta_6h": yes_price_delta,
+                    "no_price_delta_6h": no_price_delta,
                     "yes_top5_seen_share": snapshot.get("yes_top5_seen_share"),
+                    "no_top5_seen_share": snapshot.get("no_top5_seen_share"),
                     "price_anomaly_hit": price_anomaly_pass,
                     "holder_concentration_hit": holder_concentration_pass,
                     "wallet_quality_hit": wallet_quality_pass,
@@ -327,15 +382,21 @@ def run(settings: Settings, db: Database) -> dict[str, int]:
                     "history_ready_6h": history_ready_6h,
                     "trade_enriched": False,
                     "reason_summary": _watchlist_reason_summary(
+                        side=recommendation_side,
                         price_anomaly_hit=price_anomaly_pass,
                         holder_concentration_hit=holder_concentration_pass,
                         wallet_quality_hit=wallet_quality_pass,
                         history_ready_6h=history_ready_6h,
                     ),
                     "component_flags_json": {
+                        "side": recommendation_side,
                         "price_anomaly": price_anomaly_pass,
+                        "price_anomaly_side": price_side,
                         "holder_concentration": holder_concentration_pass,
+                        "holder_concentration_side": holder_side,
                         "wallet_quality": wallet_quality_pass,
+                        "yes_wallet_quality": yes_wallet_quality_pass,
+                        "no_wallet_quality": no_wallet_quality_pass,
                         "history_ready_6h": history_ready_6h,
                     },
                 }

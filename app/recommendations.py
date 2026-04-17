@@ -85,8 +85,34 @@ def resolved_yes_price(raw_json: str | None, latest_yes_price: float | None) -> 
     return None
 
 
+def normalize_recommendation_side(value: Any) -> str:
+    normalized = str(value or "Yes").strip().lower()
+    if normalized in {"no", "n"}:
+        return "No"
+    return "Yes"
+
+
+def recommendation_code(action: str, side: Any) -> str:
+    normalized_side = normalize_recommendation_side(side).lower()
+    if action == "consider":
+        return f"consider_{normalized_side}"
+    if action == "watch":
+        return f"watch_{normalized_side}"
+    return "wait_for_history"
+
+
+def resolved_side_price(raw_json: str | None, latest_yes_price: float | None, side: Any) -> float | None:
+    yes_price = resolved_yes_price(raw_json, latest_yes_price)
+    if yes_price is None:
+        return None
+    if normalize_recommendation_side(side) == "No":
+        return round(1.0 - yes_price, 4)
+    return yes_price
+
+
 def recommendation_meta(row: Dict[str, Any]) -> tuple[str, str, float]:
     score_total = float(row.get("score_total") or 0.0)
+    side = normalize_recommendation_side(row.get("side"))
     watchlist_strength = float(
         int(bool(row.get("price_anomaly_hit")))
         + int(bool(row.get("holder_concentration_hit")))
@@ -99,14 +125,14 @@ def recommendation_meta(row: Dict[str, Any]) -> tuple[str, str, float]:
 
     if row.get("source") == "alert" or row.get("alert_ts"):
         if row.get("severity") == "high" or row.get("confidence") == "high" or score_total >= 8.0:
-            return "consider_yes", "actionable", conviction_score
-        return "watch_yes", "monitoring", conviction_score
+            return recommendation_code("consider", side), "actionable", conviction_score
+        return recommendation_code("watch", side), "monitoring", conviction_score
     if row.get("warmup_only"):
         return "wait_for_history", "monitoring", conviction_score
     if row.get("history_ready_6h") and (
         row.get("trade_enriched") or row.get("wallet_quality_hit") or row.get("price_anomaly_hit")
     ):
-        return "watch_yes", "monitoring", conviction_score
+        return recommendation_code("watch", side), "monitoring", conviction_score
     return "wait_for_history", "monitoring", conviction_score
 
 
@@ -122,9 +148,11 @@ def outcome_verdict(entry_price: float | None, final_price: float | None) -> tup
 
 
 def recommendation_from_alert(alert: Alert, *, alert_ts: str) -> Dict[str, Any]:
+    side = normalize_recommendation_side(getattr(alert, "side", "Yes"))
     recommendation, status, conviction_score = recommendation_meta(
         {
             "source": "alert",
+            "side": side,
             "severity": alert.severity,
             "confidence": alert.confidence,
             "score_total": alert.score_total,
@@ -136,13 +164,14 @@ def recommendation_from_alert(alert: Alert, *, alert_ts: str) -> Dict[str, Any]:
         "source": "alert",
         "market_title": alert.market_title,
         "market_url": alert.market_url,
-        "side": "Yes",
+        "side": side,
         "recommendation": recommendation,
         "status": status,
         "conviction_score": conviction_score,
         "severity": alert.severity,
         "confidence": alert.confidence,
         "reason_summary": alert.reason_summary,
+        "entry_price": alert.current_yes_price,
         "entry_yes_price": alert.current_yes_price,
         "history_ready_6h": True,
         "warmup_only": False,
@@ -163,28 +192,36 @@ def recommendation_from_alert(alert: Alert, *, alert_ts: str) -> Dict[str, Any]:
 
 
 def recommendation_from_watchlist(row: Dict[str, Any]) -> Dict[str, Any]:
+    side = normalize_recommendation_side(row.get("side"))
     recommendation, status, conviction_score = recommendation_meta({**row, "source": "watchlist"})
+    entry_price = row.get("entry_price")
+    if entry_price is None:
+        entry_price = row.get("current_no_price") if side == "No" else row.get("current_yes_price")
     return {
         "entry_ts": row["snapshot_ts"],
         "condition_id": row["condition_id"],
         "source": "watchlist",
         "market_title": row.get("market_title"),
         "market_url": row.get("market_url"),
-        "side": "Yes",
+        "side": side,
         "recommendation": recommendation,
         "status": status,
         "conviction_score": conviction_score,
         "severity": None,
         "confidence": None,
         "reason_summary": row.get("reason_summary"),
+        "entry_price": entry_price,
         "entry_yes_price": row.get("current_yes_price"),
         "history_ready_6h": bool(row.get("history_ready_6h")),
         "warmup_only": bool(row.get("warmup_only")),
         "trade_enriched": bool(row.get("trade_enriched")),
         "source_meta_json": safe_json_dumps(
             {
+                "side": side,
                 "price_delta_6h": row.get("price_delta_6h"),
+                "no_price_delta_6h": row.get("no_price_delta_6h"),
                 "yes_top5_seen_share": row.get("yes_top5_seen_share"),
+                "no_top5_seen_share": row.get("no_top5_seen_share"),
                 "price_anomaly_hit": bool(row.get("price_anomaly_hit")),
                 "holder_concentration_hit": bool(row.get("holder_concentration_hit")),
                 "wallet_quality_hit": bool(row.get("wallet_quality_hit")),

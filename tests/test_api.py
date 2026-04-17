@@ -568,6 +568,61 @@ def test_read_service_recommendations_include_settled_feedback(tmp_path: Path) -
     assert settled_item.outcome_return == 0.6129
 
 
+def test_read_service_recommendations_score_no_side_feedback(tmp_path: Path) -> None:
+    settings = _build_fixture_db(tmp_path)
+    db = Database(settings.db_path)
+    try:
+        db.conn.execute(
+            """
+            INSERT INTO market_snapshots (
+                condition_id, snapshot_ts, yes_price, no_price, yes_side, no_side, yes_holder_count, no_holder_count,
+                yes_top_holder_amount, no_top_holder_amount, yes_top5_seen_share, no_top5_seen_share, observed_holder_wallets, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("cond-2", "2026-04-08 02:00:00", 0.0, 1.0, "sell", "buy", 6, 10, 20, 300, 0.18, 0.82, 18, "{}"),
+        )
+        db.insert_recommendation(
+            {
+                "entry_ts": "2026-04-07 20:00:00",
+                "condition_id": "cond-2",
+                "source": "alert",
+                "market_title": "Closed Fixture Market",
+                "market_url": "https://polymarket.com/event/event-slug",
+                "side": "No",
+                "recommendation": "consider_no",
+                "status": "actionable",
+                "conviction_score": 9.1,
+                "severity": "high",
+                "confidence": "high",
+                "reason_summary": "strong wallets accumulated on No before resolution",
+                "entry_price": 0.38,
+                "entry_yes_price": 0.62,
+                "history_ready_6h": True,
+                "warmup_only": False,
+                "trade_enriched": True,
+            }
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    from app.read_db import read_connection
+
+    with read_connection(settings.db_path) as conn:
+        recommendations = list_recommendations(conn, limit=10)
+
+    assert recommendations.total == 1
+    item = recommendations.items[0]
+    assert item.side == "No"
+    assert item.status == "settled"
+    assert item.entry_price == 0.38
+    assert item.current_price == 1.0
+    assert item.final_price == 1.0
+    assert item.final_yes_price == 0.0
+    assert item.outcome_verdict == "good_call"
+    assert item.outcome_return == 1.6316
+
+
 def test_api_serializes_overview_and_market_detail(tmp_path: Path, monkeypatch) -> None:
     settings = _build_fixture_db(tmp_path)
     monkeypatch.setattr("app.api_server.settings", settings)
